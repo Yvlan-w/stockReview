@@ -1,0 +1,25 @@
+/* ============================================================
+ * 设计令牌（Design Tokens）
+ * 全局 CSS 变量，所有组件样式统一引用，禁止在组件内硬编码颜色/阴影/圆角
+ * ============================================================ */
+:root {
+    --color-primary: #0052ff;
+    --color-primary-active: #003ecc;
+    --color-up: #cf202f;
+    --color-down: #05b169;
+    --color-warning: #f4b000;
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06), 0 2px 4px rgba(0, 0, 0, 0.02);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.08), 0 4px 8px rgba(0, 0, 0, 0.03);
+    --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.10), 0 8px 16px rgba(0, 0, 0, 0.04);
+    --shadow-primary: 0 4px 16px rgba(0, 82, 255, 0.20);
+    --shadow-up: 0 4px 16px rgba(207, 32, 47, 0.15);
+    --shadow-down: 0 4px 16px rgba(5, 177, 105, 0.15);
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 20px;
+    --radius-2xl: 24px;
+    --radius-3xl: 32px;
+}

@@ -1,0 +1,9 @@
+/* ============================================================
+ * 导航栏组件（玻璃拟态）
+ * ============================================================ */
+.glass-nav {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid rgba(222, 225, 230, 0.6);
+}

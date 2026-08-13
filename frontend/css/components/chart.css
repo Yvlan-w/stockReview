@@ -1,0 +1,21 @@
+/* ============================================================
+ * 图表 / 板块热力条 / 装饰背景
+ * ============================================================ */
+.chart-container { position: relative; height: 280px; }
+
+.bg-pattern-dot {
+    background-image: radial-gradient(circle, rgba(0, 82, 255, 0.03) 1px, transparent 1px);
+    background-size: 24px 24px;
+}
+
+.sector-bar-track {
+    background: rgba(0, 0, 0, 0.03);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+}
+.sector-bar-fill {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}

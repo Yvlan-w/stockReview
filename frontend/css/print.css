@@ -1,0 +1,19 @@
+/* ============================================================
+ * 打印样式（PDF 导出 / Ctrl+P）
+ * ============================================================ */
+@media print {
+    nav, #positionModal, #adjustModal, #identityModal, #toast {
+        display: none !important;
+    }
+    main { padding-top: 0 !important; }
+    .stat-card, .index-card, .news-card,
+    .sector-heatmap, .leadership-card, .driver-card {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+    table { break-inside: auto; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
+    h2, h3, .section-title { break-after: avoid; page-break-after: avoid; }
+    body { background: #ffffff !important; }
+    ::-webkit-scrollbar { display: none; }
+}

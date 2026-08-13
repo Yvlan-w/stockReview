@@ -1,0 +1,32 @@
+/* ============================================================
+ * 按钮 / 标题组件
+ * ============================================================ */
+.section-title {
+    position: relative;
+    padding-left: 14px;
+}
+.section-title::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 4px;
+    height: 20px;
+    background: linear-gradient(180deg, #0052ff 0%, #4d8bff 100%);
+    border-radius: 2px;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #0052ff 0%, #003ecc 100%);
+    color: #ffffff;
+    box-shadow: 0 2px 8px rgba(0, 82, 255, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    transition: all 0.25s ease;
+}
+.btn-primary:hover {
+    box-shadow: 0 4px 16px rgba(0, 82, 255, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    transform: translateY(-1px);
+}
+.btn-primary:active {
+    transform: translateY(0);
+}

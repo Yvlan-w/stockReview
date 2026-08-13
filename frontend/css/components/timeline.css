@@ -1,0 +1,25 @@
+/* ============================================================
+ * 时间线 / 资讯卡片
+ * ============================================================ */
+.timeline-item::before {
+    content: '';
+    position: absolute;
+    left: 20px;
+    top: 48px;
+    bottom: -24px;
+    width: 2px;
+    background: linear-gradient(180deg, #dee1e6 0%, #eef0f3 100%);
+}
+.timeline-item:last-child::before { display: none; }
+
+.news-card {
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    border-left: 3px solid transparent;
+    position: relative;
+}
+.news-card:hover {
+    border-left-color: #0052ff;
+    background: linear-gradient(90deg, rgba(0, 82, 255, 0.015) 0%, #ffffff 30%);
+    box-shadow: var(--shadow-sm);
+    transform: translateX(2px);
+}

@@ -1,0 +1,7 @@
+/* ============================================================
+ * 徽章组件（涨跌/中性/警示）
+ * ============================================================ */
+.badge-up { background-color: rgba(207, 32, 47, 0.1); color: #cf202f; }
+.badge-down { background-color: rgba(5, 177, 105, 0.1); color: #05b169; }
+.badge-neutral { background-color: rgba(0, 82, 255, 0.1); color: #0052ff; }
+.badge-warning { background-color: rgba(244, 176, 0, 0.1); color: #f4b000; }

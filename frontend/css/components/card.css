@@ -1,0 +1,62 @@
+/* ============================================================
+ * 卡片组件：高级卡片 / 指标卡片 / 指数卡片
+ * ============================================================ */
+.premium-card {
+    background: #ffffff;
+    border: 1px solid #eceef1;
+    border-radius: var(--radius-2xl);
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s ease;
+}
+.premium-card:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-lg);
+    border-color: #d8dce2;
+}
+
+.stat-card {
+    background: #ffffff;
+    border: 1px solid #eceef1;
+    border-radius: var(--radius-2xl);
+    box-shadow: var(--shadow-sm);
+    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+}
+.stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+.stat-card[data-accent="blue"]::before    { background: linear-gradient(90deg, #0052ff, #4d8bff); }
+.stat-card[data-accent="up"]::before      { background: linear-gradient(90deg, #cf202f, #ff5050); }
+.stat-card[data-accent="down"]::before    { background: linear-gradient(90deg, #05b169, #2ed47a); }
+.stat-card[data-accent="purple"]::before  { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
+.stat-card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-lg);
+}
+.stat-card:hover::before { opacity: 1; }
+
+.index-card {
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+.index-card::after {
+    content: '';
+    position: absolute;
+    bottom: -20px; right: -20px;
+    width: 80px; height: 80px;
+    border-radius: 50%;
+    opacity: 0.06;
+}
+.index-card.up { background: linear-gradient(135deg, rgba(207, 32, 47, 0.06) 0%, rgba(207, 32, 47, 0.02) 100%); }
+.index-card.up::after { background: #cf202f; }
+.index-card.down { background: linear-gradient(135deg, rgba(5, 177, 105, 0.06) 0%, rgba(5, 177, 105, 0.02) 100%); }
+.index-card.down::after { background: #05b169; }

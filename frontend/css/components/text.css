@@ -1,0 +1,22 @@
+/* ============================================================
+ * 文本组件（渐变文字 / 多行截断）
+ * ============================================================ */
+.text-gradient {
+    background: linear-gradient(135deg, #0052ff 0%, #003ecc 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.text-gradient-up {
+    background: linear-gradient(135deg, #cf202f 0%, #ff5050 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
