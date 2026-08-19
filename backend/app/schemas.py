@@ -28,12 +28,16 @@ class TokenOut(BaseModel):
 
 
 class UserCreate(BaseModel):
-    username: str = Field(..., min_length=1, max_length=64)
-    password: str = Field(..., min_length=6, max_length=128)
+    username: Optional[str] = None   # 为空则按姓名拼音自动生成
+    password: Optional[str] = None   # 为空则自动生成随机初始密码
     role: str
     sub_role: Optional[str] = None
     name: str = Field(..., min_length=1, max_length=64)
     email: Optional[str] = None
+
+
+class UserCreateOut(UserOut):
+    initial_password: Optional[str] = None   # 自动生成时返回初始密码（明文，仅一次）
 
 
 # ---- 持仓 ----
@@ -64,6 +68,7 @@ class ClientCreate(BaseModel):
     service_ids: List[str] = []
     owner_user_id: Optional[str] = None
     positions: List[PositionIn] = []
+    create_login: bool = False   # 是否同时创建 user-client 登录账号
 
 
 class ClientUpdate(BaseModel):
@@ -80,6 +85,10 @@ class RelationsUpdate(BaseModel):
     service_ids: List[str] = []
 
 
+class PositionsUpdate(BaseModel):
+    positions: List[PositionIn] = []
+
+
 class ClientOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -93,6 +102,10 @@ class ClientOut(BaseModel):
     advisor_name: Optional[str] = None
     service_ids: List[str] = []
     positions: List[PositionOut] = []
+
+
+class ClientCreateOut(ClientOut):
+    login: Optional[UserCreateOut] = None   # create_login=True 时返回生成的登录账号
 
 
 # ---- 风险预警 ----
@@ -125,3 +138,36 @@ class NotificationOut(BaseModel):
 
 class UnreadCountOut(BaseModel):
     unread: int
+
+
+# ---- 用户选项（开户/关系映射下拉） ----
+class UserOptionsOut(BaseModel):
+    advisors: List[UserOut] = []
+    services: List[UserOut] = []
+
+
+# ---- 关系映射批量导入/导出（CSV + JSON 双格式） ----
+class RelationImportRow(BaseModel):
+    client_id: Optional[str] = None   # 为空则自动生成客户编号
+    name: str = Field(..., min_length=1, max_length=64)
+    advisor_id: str
+    service_ids: List[str] = []
+
+
+class RelationExportRow(BaseModel):
+    client_id: str
+    name: str
+    advisor_id: str
+    advisor_name: Optional[str] = None
+    service_ids: List[str] = []
+
+
+class RelationImportError(BaseModel):
+    row: int
+    detail: str
+
+
+class RelationImportResult(BaseModel):
+    created: int = 0
+    updated: int = 0
+    errors: List[RelationImportError] = []

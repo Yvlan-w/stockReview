@@ -1,27 +1,34 @@
 // ============================================================
-// 行情数据服务（东方财富 JSONP 实时源）
+// 行情数据服务：从自己后端读取快照（后端定时调东财并落库）
+// 前端不再直连第三方行情，彻底解决 CORS/Referer/连接重置等问题
+// 注意：loadJsonp 保留供 newsService.js 的资讯 JSONP 调用使用
 // ============================================================
-import { MARKET_APIS, MARKET_SECIDS, SH_INDEX_SECID, REALTIME_FIELDS, EASTMONEY_UT } from '../core/config.js';
 
 // 行情数据状态
 export let marketDataState = {
-    source: 'mock',      // 'real' | 'mock'
+    source: 'mock',           // 'real' | 'mock'
     loading: false,
-    realtime: null,      // parsed realtime data
-    kline: null,         // parsed SH kline data
-    lastUpdated: null,
+    realtime: null,           // parsed realtime data
+    kline: null,              // parsed SH kline data
+    sectors: null,            // parsed sector data (top 80 industries sorted by turnover desc, from East Money)
+    analysis: null,           // market analysis: rotation + drivers
+    lastUpdated: null,        // 后端快照 updated_at 时间
+    fetchStatus: 'pending',   // 'ok' | 'fail' | 'pending'
+    fetchError: null,
     error: null
 };
+
+// --- 资讯 JSONP 通用加载器（newsService 在用，行情接口已移除 ---
 
 /**
  * 通用 JSONP 加载器（动态 <script> 标签）
  */
 export function loadJsonp(url, callbackParam = 'cb', timeout = 12000) {
     return new Promise((resolve, reject) => {
-        const cbName = 'em_callback_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+        const cbName = 'cb_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
         const sep = url.includes('?') ? '&' : '?';
         const script = document.createElement('script');
-        script.referrerPolicy = 'no-referrer'; // 避免携带 localhost/127.0.0.1 来源导致东财重置连接(ERR_ABORTED)
+        script.referrerPolicy = 'no-referrer';
         script.src = `${url}${sep}${callbackParam}=${cbName}`;
 
         const timer = setTimeout(() => {
@@ -32,153 +39,80 @@ export function loadJsonp(url, callbackParam = 'cb', timeout = 12000) {
         function cleanup() {
             clearTimeout(timer);
             if (script.parentNode) script.parentNode.removeChild(script);
-            try {
-                delete window[cbName];
-            } catch (e) {
-                window[cbName] = undefined;
-            }
+            try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
         }
 
-        window[cbName] = (data) => {
-            cleanup();
-            resolve(data);
-        };
-
-        script.onerror = () => {
-            cleanup();
-            reject(new Error('脚本加载失败，可能被浏览器拦截'));
-        };
-
+        window[cbName] = (data) => { cleanup(); resolve(data); };
+        script.onerror = () => { cleanup(); reject(new Error('脚本加载失败，可能被浏览器拦截')); };
         document.head.appendChild(script);
     });
 }
 
+// --- 行情接口（走自己后端，不再直连东财） ---
+
+const API_BASE = '/api/market';
+
+async function _fetchMarket(path) {
+    const resp = await fetch(`${API_BASE}${path}`, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`后端行情接口失败: ${resp.status}`);
+    return resp.json();
+}
+
 /**
- * 拉取实时指数 + 涨跌家数（东方财富）
+ * 拉取实时行情快照（后端从数据库返回，<1ms）。
+ * 空库或后端初始刷新未完成时抛错（调用方按"保留上次结果"策略处理）。
  */
 export async function fetchRealtimeMarketData() {
-    const query = `fltt=2&invt=2&ut=${EASTMONEY_UT}&fields=${REALTIME_FIELDS}&secids=${MARKET_SECIDS}`;
-    let data = null;
-    let lastErr = null;
-
-    for (const host of MARKET_APIS.realtime) {
-        try {
-            data = await loadJsonp(`${host}?${query}`, 'cb', 10000);
-            break;
-        } catch (err) {
-            lastErr = err;
-        }
+    const body = await _fetchMarket('/realtime');
+    marketDataState.fetchStatus = body.fetch_status || 'pending';
+    marketDataState.fetchError = body.fetch_error || null;
+    if (!body.data) {
+        throw new Error(body.fetch_status === 'pending' ? '行情数据尚未就绪' : `行情获取失败: ${body.fetch_error || body.fetch_status}`);
     }
-
-    if (!data || data.rc !== 0 || !data.data || !Array.isArray(data.data.diff)) {
-        throw lastErr || new Error('接口返回数据格式异常');
-    }
-
-    const items = data.data.diff;
-    const sh = items.find(i => i.f13 === 1 && i.f12 === '000001');
-    const sz = items.find(i => i.f13 === 0 && i.f12 === '399001');
-    const cy = items.find(i => i.f13 === 0 && i.f12 === '399006');
-
-    if (!sh || !sz || !cy) {
-        throw new Error('未能获取完整指数数据');
-    }
-
-    // 沪深合并全市场涨跌家数（深证成指已含创业板，故不重复加计 399006）
-    const advCount = (sh.f104 || 0) + (sz.f104 || 0);
-    const decCount = (sh.f105 || 0) + (sz.f105 || 0);
-    const flatCount = (sh.f106 || 0) + (sz.f106 || 0);
-    const totalStocks = advCount + decCount + flatCount;
-
-    // 两市成交额（亿元，f6 为元）
-    const totalTurnoverYi = ((sh.f6 || 0) + (sz.f6 || 0)) / 1e8;
-
-    // 前一日成交额估算：SH 日 K 线前一日成交额 + 今日沪深比
-    let prevVolumeYi = marketDataState.realtime?.prevVolume;
-    if (marketDataState.kline && marketDataState.kline.length >= 2) {
-        const prevDay = marketDataState.kline[marketDataState.kline.length - 2];
-        const shPrevTurnoverYi = (prevDay.turnover || 0) / 1e8;
-        const shTodayTurnoverYi = (sh.f6 || 0) / 1e8;
-        const szTodayTurnoverYi = (sz.f6 || 0) / 1e8;
-        const ratio = shTodayTurnoverYi > 0 ? szTodayTurnoverYi / shTodayTurnoverYi : 1;
-        prevVolumeYi = shPrevTurnoverYi * (1 + ratio);
-    }
-    if (!prevVolumeYi || prevVolumeYi <= 0) {
-        prevVolumeYi = totalTurnoverYi * 0.95; // fallback
-    }
-
+    const d = body.data;
+    marketDataState.source = 'real';
+    marketDataState.lastUpdated = body.updated_at ? new Date(body.updated_at) : new Date();
     return {
-        indices: [
-            {
-                name: '上证指数',
-                value: sh.f2,
-                prevClose: (sh.f2 || 0) - (sh.f4 || 0),
-                change: sh.f4,
-                changePct: sh.f3
-            },
-            {
-                name: '深证成指',
-                value: sz.f2,
-                prevClose: (sz.f2 || 0) - (sz.f4 || 0),
-                change: sz.f4,
-                changePct: sz.f3
-            },
-            {
-                name: '创业板指',
-                value: cy.f2,
-                prevClose: (cy.f2 || 0) - (cy.f4 || 0),
-                change: cy.f4,
-                changePct: cy.f3
-            }
-        ],
-        totalVolume: totalTurnoverYi,
-        prevVolume: prevVolumeYi,
-        advCount,
-        decCount,
-        flatCount,
-        totalStocks
+        indices: d.indices,
+        totalVolume: d.totalVolume,
+        prevVolume: d.prevVolume,
+        advCount: d.advCount,
+        decCount: d.decCount,
+        flatCount: d.flatCount,
+        totalStocks: d.totalStocks,
     };
 }
 
-// 内存级 K 线缓存（当日有效）
-export let klineCache = { date: null, data: null };
+/**
+ * 拉取指定指数近 N 日 K 线（后端从数据库返回）。
+ * @param {string} indexCode - 指数代码: 1.000001(上证) 0.399001(深证) 0.399006(创业板) 1.000688(科创50)
+ */
+export async function fetchShKlineData(indexCode = '1.000001') {
+    const body = await _fetchMarket(`/kline?index=${indexCode}`);
+    if (!body.data || body.data.length === 0) {
+        throw new Error('K 线数据尚未就绪');
+    }
+    return body.data;
+}
 
 /**
- * 拉取上证指数近 30 个交易日日 K 线（东方财富）
+ * 拉取行业板块行情（涨跌幅排序，最多 80 条）。
  */
-export async function fetchShKlineData() {
-    const today = new Date().toISOString().slice(0, 10);
-    if (klineCache.date === today && klineCache.data) {
-        return klineCache.data;
+export async function fetchSectors(limit = 80) {
+    const body = await _fetchMarket(`/sectors?limit=${limit}`);
+    if (!body.data || body.data.length === 0) {
+        throw new Error('板块数据尚未就绪');
     }
+    return body.data;
+}
 
-    const fields1 = 'f1,f2,f3,f4,f5,f6';
-    const fields2 = 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61';
-    const url = `${MARKET_APIS.kline}?secid=${SH_INDEX_SECID}&ut=${EASTMONEY_UT}&fields1=${fields1}&fields2=${fields2}&klt=101&fqt=0&end=20500101&lmt=30`;
-    const data = await loadJsonp(url, 'cb', 12000);
-
-    if (!data || data.rc !== 0 || !data.data || !Array.isArray(data.data.klines)) {
-        throw new Error('K线接口返回数据格式异常');
+/**
+ * 拉取市场深度分析（高低切 / 领涨方向 / 核心驱动因素）。
+ */
+export async function fetchMarketAnalysis() {
+    const body = await _fetchMarket('/analysis');
+    if (!body.data) {
+        throw new Error('市场分析数据尚未就绪');
     }
-
-    const parsed = data.data.klines.map(line => {
-        const parts = line.split(',');
-        return {
-            fullDate: parts[0],
-            date: parts[0].slice(5),          // MM-DD
-            open: parseFloat(parts[1]),
-            close: parseFloat(parts[2]),
-            high: parseFloat(parts[3]),
-            low: parseFloat(parts[4]),
-            volume: parseFloat(parts[5]),     // 成交量（手）
-            turnover: parseFloat(parts[6]),   // 成交额（元）
-            amplitude: parseFloat(parts[7]),
-            changePct: parseFloat(parts[8]),
-            change: parseFloat(parts[9]),
-            turnoverRate: parseFloat(parts[10])
-        };
-    });
-
-    klineCache.date = today;
-    klineCache.data = parsed;
-    return parsed;
+    return body.data;
 }

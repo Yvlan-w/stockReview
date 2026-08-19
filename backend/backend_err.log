@@ -1,0 +1,17 @@
+INFO:     Will watch for changes in these directories: ['D:\\github_rep\\stockHoldingReview\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8011 (Press CTRL+C to quit)
+INFO:     Started reloader process [32252] using StatReload
+INFO:     Started server process [32452]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+实时行情 host=https://push2.eastmoney.com/api/qt/ulist.np/get 失败: Server disconnected without sending a response.
+板块 host=https://push2.eastmoney.com/api/qt/clist/get 失败: Server disconnected without sending a response.
+WARNING:  StatReload detected changes in '_audit_v2.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [35524]
+INFO:     Started server process [33812]
+INFO:     Waiting for application starINFO: INFO:     Application startup complete.
+     Waiting for application startup.
+INFO:     Application startup complete.

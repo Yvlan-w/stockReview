@@ -8,8 +8,55 @@ import {
     fetchNotifications, fetchUnreadCount, markNotificationRead,
     markAllNotificationsRead, connectSocket,
 } from '../services/authService.js';
+import { getFilteredClients, setCurrentClient, loadClients } from '../services/clientService.js';
+import { renderClientList, refreshClientDetail } from './workbench.js';
+import { isWorkbenchVisible, canEdit, canAccessAdminPanel, canAccessOnboarding } from '../permissions/access.js';
 
 let socket = null;
+
+// ---- 权限驱动界面可见性 ----
+function applyAccessControl() {
+    const visible = isWorkbenchVisible();
+    const workbench = document.getElementById('workbench');
+    const placeholder = document.getElementById('workbenchPlaceholder');
+    if (workbench) workbench.classList.toggle('hidden', !visible);
+    if (placeholder) placeholder.classList.toggle('hidden', visible);
+
+    // 编辑入口（添加持仓 / 恢复示例数据等）按角色显示
+    const canEditNow = canEdit();
+    document.querySelectorAll('[data-require-edit]').forEach(el => {
+        el.classList.toggle('hidden', !canEditNow);
+    });
+
+    // 角色专属入口：管理后台（仅管理员）/ 客户开户（客服或管理员）
+    const adminBtn = document.getElementById('adminPanelBtn');
+    if (adminBtn) adminBtn.classList.toggle('hidden', !canAccessAdminPanel());
+    const onboardingBtn = document.getElementById('onboardingBtn');
+    if (onboardingBtn) onboardingBtn.classList.toggle('hidden', !canAccessOnboarding());
+
+    // 客户相关图表 / 策略复盘按工作台可见性显示
+    document.querySelectorAll('[data-scope="client"]').forEach(el => {
+        el.classList.toggle('hidden', !visible);
+    });
+
+    if (!visible) {
+        const list = document.getElementById('clientList');
+        if (list) list.innerHTML = '';
+        const profile = document.getElementById('clientProfileCard');
+        if (profile) profile.innerHTML = '';
+        const risk = document.getElementById('riskAlertCard');
+        if (risk) risk.innerHTML = '';
+    }
+}
+
+// 按当前角色重新渲染客户列表与详情
+function renderWorkspaceData() {
+    if (!isWorkbenchVisible()) return;
+    renderClientList();
+    const first = getFilteredClients()[0];
+    setCurrentClient(first ? first.id : null);
+    refreshClientDetail();
+}
 
 // ---- 导航栏用户状态渲染 ----
 function renderNavState() {
@@ -59,6 +106,9 @@ export async function handleLogin(event) {
         showToast('登录成功', 'success');
         renderNavState();
         renderAuthModal();
+        applyAccessControl();
+        await loadClients();
+        renderWorkspaceData();
         refreshNotifications();
         connectRealtime();
         const form = document.getElementById('loginForm');
@@ -79,6 +129,8 @@ export async function handleLogout() {
     await logout();
     renderNavState();
     renderAuthModal();
+    await loadClients();  // 清空内存中的客户数据（已退出登录）
+    applyAccessControl();
     hideNotificationPanel();
     showToast('已退出登录', 'success');
 }
@@ -204,6 +256,7 @@ function disconnectRealtime() {
 export function initAuth() {
     renderNavState();
     renderAuthModal();
+    applyAccessControl();
     if (isLoggedIn()) {
         refreshNotifications();
         connectRealtime();

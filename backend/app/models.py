@@ -157,3 +157,63 @@ class Notification(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
     recipient = relationship("User", back_populates="notifications")
+
+
+# ---------------------------------------------------------------------------
+# 行情数据（后台定时刷新并落库；前端只读，不直接调第三方）
+# ---------------------------------------------------------------------------
+
+class MarketSnapshot(Base):
+    """实时行情快照（覆盖式，永远只有 id=1 一行）。"""
+    __tablename__ = "market_snapshot"
+
+    id = Column(Integer, primary_key=True)
+    snapshot_type = Column(String(16), nullable=False, default="realtime")
+    data = Column(JSON, nullable=False)
+    source = Column(String(32), nullable=False, default="eastmoney")
+    fetch_status = Column(String(8), nullable=False, default="ok")  # ok / fail / pending
+    fetch_error = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class MarketKline(Base):
+    """指数日 K 线（最多 40 行/指数，insert-or-update）。
+
+    支持多指数：上证指数(1.000001)、深证成指(0.399001)、创业板指(0.399006)、科创50(1.000688)。
+    index_code + trade_date 联合唯一。
+    """
+    __tablename__ = "market_kline"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    index_code = Column(String(16), nullable=False, default="1.000001", index=True)
+    trade_date = Column(String(10), nullable=False, index=True)
+    open = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    volume = Column(Float, nullable=True)
+    turnover = Column(Float, nullable=True)
+    change_pct = Column(Float, nullable=True)
+    data_source = Column(String(32), nullable=False, default="eastmoney")
+    raw = Column(JSON, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("index_code", "trade_date", name="uq_index_trade_date"),
+    )
+
+
+class MarketSector(Base):
+    """行业板块行情（东财行业板块实时行情，每次覆盖全部 496 个行业）。"""
+    __tablename__ = "market_sector"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sector_code = Column(String(16), unique=True, nullable=False, index=True)
+    sector_name = Column(String(64), nullable=False)
+    sector_type = Column(String(16), nullable=False, default="industry")
+    change_pct = Column(Float, nullable=True)
+    turnover = Column(Float, nullable=True)
+    up_count = Column(Integer, nullable=True)
+    down_count = Column(Integer, nullable=True)
+    raw = Column(JSON, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

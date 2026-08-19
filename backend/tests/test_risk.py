@@ -154,6 +154,22 @@ def test_update_alert_status_guest_forbidden(client, login):
     assert r.status_code == 403
 
 
+def test_update_alert_status_user_role_forbidden(client, login):
+    # 客户（user 角色）不可处理预警，即使拥有该客户
+    client.post("/api/risk/evaluate/C001", headers=login("admin"))
+    alert_id = client.get("/api/clients/C001/alerts", headers=login("admin")).json()[0]["id"]
+    r = client.patch(f"/api/alerts/{alert_id}", headers=login("client001"), json={"status": "resolved"})
+    assert r.status_code == 403
+
+
+def test_update_alert_status_service_other_client_forbidden(client, login):
+    # svc_003 不服务 C001，不能处理其预警
+    client.post("/api/risk/evaluate/C001", headers=login("admin"))
+    alert_id = client.get("/api/clients/C001/alerts", headers=login("admin")).json()[0]["id"]
+    r = client.patch(f"/api/alerts/{alert_id}", headers=login("svc_003"), json={"status": "resolved"})
+    assert r.status_code == 403
+
+
 def test_update_alert_status_not_found(client, login):
     r = client.patch("/api/alerts/99999", headers=login("admin"), json={"status": "resolved"})
     assert r.status_code == 404

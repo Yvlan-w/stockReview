@@ -117,6 +117,16 @@
                         <div id="notificationList" class="divide-y divide-hairline-soft"></div>
                     </div>
                 </div>
+                <!-- 客户开户（客服 / 管理员） -->
+                <button id="onboardingBtn" onclick="openOnboarding()" class="hidden flex items-center gap-2 px-3 py-2 text-sm font-medium text-body bg-surface-strong border border-hairline rounded-lg hover:text-ink hover:bg-hairline transition-colors">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"/></svg>
+                    <span class="hidden sm:inline">客户开户</span>
+                </button>
+                <!-- 管理后台（仅管理员） -->
+                <button id="adminPanelBtn" onclick="openAdminPanel()" class="hidden flex items-center gap-2 px-3 py-2 text-sm font-medium text-body bg-surface-strong border border-hairline rounded-lg hover:text-ink hover:bg-hairline transition-colors">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    <span class="hidden sm:inline">管理后台</span>
+                </button>
                 <!-- 身份管理入口（Phase 2 接入角色/权限） -->
                 <button onclick="openIdentityModal()" class="flex items-center gap-2 px-3 py-2 text-sm font-medium text-body bg-surface-strong border border-hairline rounded-lg hover:text-ink hover:bg-hairline transition-colors">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -132,6 +142,21 @@
     <main class="pt-16">
 
         <!-- ==================== 1. 客户工作台 ==================== -->
+        <!-- 登录占位（游客 / 未登录时显示） -->
+        <section id="workbenchPlaceholder" class="hidden px-6 pt-8 pb-2">
+            <div class="max-w-[1400px] mx-auto">
+                <div class="premium-card p-14 text-center">
+                    <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-surface-strong flex items-center justify-center text-muted">
+                        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                    </div>
+                    <h2 class="text-xl font-semibold text-ink mb-2">请登录查看客户持仓</h2>
+                    <p class="text-sm text-muted mb-5">客户持仓工作台仅对登录用户开放，游客可浏览市场资讯与行情</p>
+                    <button onclick="openIdentityModal()" class="btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-pill">
+                        立即登录
+                    </button>
+                </div>
+            </div>
+        </section>
         <section id="workbench" class="px-6 pt-8 pb-2">
             <div class="max-w-[1400px] mx-auto">
                 <!-- 市场环境横条（JS 渲染） -->
@@ -141,7 +166,7 @@
                 <div class="mb-6 flex items-end justify-between flex-wrap gap-4">
                     <div>
                         <h1 class="section-title text-2xl md:text-3xl font-semibold text-ink tracking-tight mb-2">客户持仓工作台</h1>
-                        <p class="text-body text-sm ml-[14px]">管理 <span id="clientTotalCount" class="font-mono font-medium text-ink">100</span> 位客户 · 按姓名筛选 · 复盘每位客户的持仓组合</p>
+                        <p class="text-body text-sm ml-[14px]">管理 <span id="clientTotalCount" class="font-mono font-medium text-ink">0</span> 位客户 · 按姓名筛选 · 复盘每位客户的持仓组合</p>
                     </div>
                     <div class="flex items-center gap-2 px-3 py-1.5 bg-canvas rounded-full border border-hairline shadow-xs">
                         <span class="w-2 h-2 bg-positive rounded-full animate-pulse-soft"></span>
@@ -196,7 +221,7 @@
                                 </div>
                                 <div class="mt-2 flex items-center gap-2">
                                     <button onclick="toggleWarnOnly()" id="warnOnlyBtn" class="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg border border-hairline text-body hover:bg-surface-strong transition-colors">⚠ 只看预警</button>
-                                    <span class="text-xs text-muted whitespace-nowrap">共 <span id="clientFilteredCount">100</span> 位</span>
+                                    <span class="text-xs text-muted whitespace-nowrap">共 <span id="clientFilteredCount">0</span> 位</span>
                                 </div>
                             </div>
                             <div id="clientList" class="max-h-[calc(100vh-300px)] overflow-y-auto divide-y divide-hairline-soft"></div>
@@ -233,10 +258,10 @@
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6 gap-4">
                                     <div>
                                         <h2 class="section-title text-xl md:text-2xl font-semibold text-ink tracking-tight">持仓明细</h2>
-                                        <p class="text-body text-sm mt-1 ml-[14px]">共 <span id="positionCount" class="font-mono font-medium text-ink">0</span> 只股票 · <button onclick="resetPositions()" class="text-primary hover:underline text-xs">恢复示例数据</button></p>
+                                        <p class="text-body text-sm mt-1 ml-[14px]">共 <span id="positionCount" class="font-mono font-medium text-ink">0</span> 只股票</p>
                                     </div>
                                     <div class="flex items-center gap-3">
-                                        <button onclick="openPositionModal()" class="btn-primary flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-pill">
+                                        <button onclick="openPositionModal()" data-require-edit class="btn-primary flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-pill">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                                             添加持仓
                                         </button>
@@ -255,7 +280,7 @@
                                     </div>
                                     <h3 class="text-lg font-semibold text-ink mb-1">暂无持仓数据</h3>
                                     <p class="text-sm text-muted mb-4">点击「添加持仓」录入您的第一只股票</p>
-                                    <button onclick="openPositionModal()" class="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-pill transition-colors">
+                                    <button onclick="openPositionModal()" data-require-edit class="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-pill transition-colors">
                                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                                         添加持仓
                                     </button>
@@ -312,7 +337,7 @@
 
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     <!-- 收益曲线图 -->
-                    <div class="lg:col-span-2 premium-card p-6">
+                    <div class="lg:col-span-2 premium-card p-6" data-scope="client">
                         <div class="flex items-center justify-between mb-4">
                             <div>
                                 <h3 class="font-semibold text-ink">收益曲线</h3>
@@ -330,7 +355,7 @@
                     </div>
 
                     <!-- 持仓分布饼图 -->
-                    <div class="premium-card p-6">
+                    <div class="premium-card p-6" data-scope="client">
                         <div class="mb-6">
                             <h3 class="font-semibold text-ink">持仓分布</h3>
                             <p class="text-sm text-muted mt-0.5">各股票仓位占比</p>
@@ -341,7 +366,7 @@
                     </div>
 
                     <!-- 每日盈亏柱状图 -->
-                    <div class="lg:col-span-3 premium-card p-6">
+                    <div class="lg:col-span-3 premium-card p-6" data-scope="client">
                         <div class="flex items-center justify-between mb-6">
                             <div>
                                 <h3 class="font-semibold text-ink">每日盈亏</h3>
@@ -377,8 +402,8 @@
                             </div>
                         </div>
 
-                        <!-- 三大指数 -->
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6" id="marketIndicesLarge"></div>
+                        <!-- 四大指数 -->
+                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6" id="marketIndicesLarge"></div>
 
                         <!-- 两市成交额 -->
                         <div class="bg-surface-soft rounded-xl p-4 mb-4 flex items-center justify-between">
@@ -416,27 +441,38 @@
                         </div>
                     </div>
 
-                    <!-- ★ 上证成交量 + 板块表现 -->
-                    <div class="lg:col-span-2 premium-card p-6">
+                    <!-- ★ 指数成交额（可切换） -->
+                    <div class="lg:col-span-3 premium-card p-6">
                         <div class="flex items-center justify-between mb-4">
                             <div>
-                                <h3 class="font-semibold text-ink">上证指数成交额</h3>
+                                <h3 class="font-semibold text-ink">指数成交额</h3>
                                 <p class="text-sm text-muted mt-0.5">近一个月日成交额走势</p>
                             </div>
-                            <span class="text-xs text-muted">单位: 亿元</span>
+                            <div class="flex items-center gap-1">
+                                <span class="text-xs text-muted mr-1">单位: 亿元</span>
+                                <span id="volumeChartLoading" class="text-xs text-muted hidden">加载中...</span>
+                            </div>
+                        </div>
+                        <!-- 切换按钮组 -->
+                        <div class="flex flex-wrap gap-1.5 mb-4" id="volumeChartTabs">
+                            <button class="index-vol-tab active" data-index="1.000001">上证指数</button>
+                            <button class="index-vol-tab" data-index="0.399001">深证成指</button>
+                            <button class="index-vol-tab" data-index="0.399006">创业板指</button>
+                            <button class="index-vol-tab" data-index="1.000688">科创50</button>
                         </div>
                         <div class="chart-container" style="height: 240px;">
                             <canvas id="volumeChart"></canvas>
                         </div>
                     </div>
 
-                    <!-- ★ 板块表现热力图 -->
-                    <div class="lg:col-span-1 premium-card p-6">
+                    <!-- ★ 板块表现热力图 (全宽) -->
+                    <div class="lg:col-span-3 premium-card p-6">
                         <div class="flex items-center justify-between mb-4">
                             <div>
                                 <h3 class="font-semibold text-ink">板块表现</h3>
-                                <p class="text-sm text-muted mt-0.5">今日涨跌幅排序</p>
+                                <p class="text-sm text-muted mt-0.5">按成交额降序排列（前 80 个行业）· 面积映射成交规模 · 颜色映射涨跌幅</p>
                             </div>
+                            <span class="text-xs text-muted">数据来源：东方财富</span>
                         </div>
                         <div id="sectorHeatmap" class="space-y-2"></div>
                     </div>
@@ -465,7 +501,7 @@
         </section>
 
         <!-- ==================== 5. 策略复盘模块 ==================== -->
-        <section id="strategy" class="px-6 py-10">
+        <section id="strategy" class="px-6 py-10" data-scope="client">
             <div class="max-w-[1400px] mx-auto">
                 <div class="mb-8">
                     <h2 class="section-title text-xl md:text-2xl font-semibold text-ink tracking-tight">策略复盘</h2>

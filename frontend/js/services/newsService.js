@@ -2,10 +2,12 @@
 // 实时资讯服务（多数据源 JSONP + 自动降级 + 兜底缓存数据）
 // ============================================================
 import { stripHtml, formatTimeAgo, extractTags } from '../core/formatters.js';
-import { mockData } from '../data/mockData.js';
 import { loadJsonp } from './marketService.js';
 
 export let liveNewsLoaded = false;
+
+// 最近一次成功加载的资讯，用于刷新失败时保留上次结果
+let lastNewsItems = [];
 
 // 各数据源当前可用状态（供界面展示）
 export let newsSourceStatus = { ok: [], fail: [] };
@@ -149,12 +151,18 @@ export async function fetchLiveNews() {
 
     if (uniqueNews.length === 0) {
         console.warn('所有资讯源均不可用:', fail);
-        renderFallbackNews(fail);
+        if (lastNewsItems.length > 0) {
+            // 刷新失败：保留上次成功结果，不覆盖
+            renderLiveNews(lastNewsItems, { ok: newsSourceStatus.ok || [], fail });
+        } else {
+            renderFallbackNews(fail);
+        }
         return;
     }
 
+    lastNewsItems = uniqueNews.slice(0, 10);
     newsSourceStatus = { ok, fail };
-    renderLiveNews(uniqueNews.slice(0, 10), { ok, fail });
+    renderLiveNews(lastNewsItems, { ok, fail });
     liveNewsLoaded = true;
 }
 
@@ -202,50 +210,21 @@ export function renderLiveNews(newsItems, { ok, fail } = {}) {
     `;
 }
 
-// 兜底资讯（全部数据源失败时使用缓存 mock 数据）
+// 兜底资讯（全部数据源失败且无上次缓存时显示空态）
 export function renderFallbackNews(fail = []) {
     const newsContainer = document.getElementById('newsList');
     if (!newsContainer) return;
 
-    const sourceLinks = {
-        '财联社': 'https://www.cls.cn',
-        '新浪财经': 'https://finance.sina.com.cn',
-        '东方财富': 'https://www.eastmoney.com',
-        '证券时报': 'http://www.stcn.com',
-        '第一财经': 'https://www.yicai.com',
-        '华尔街见闻': 'https://wallstreetcn.com',
-        '经济日报': 'http://www.ce.cn',
-    };
-
     newsSourceStatus = { ok: [], fail };
 
     newsContainer.innerHTML = `
-        <div class="flex items-center justify-between mb-3 px-1">
-            <div class="flex items-center gap-2 text-sm text-muted flex-wrap">
-                <span class="w-2 h-2 bg-warning rounded-full"></span>
-                <span>资讯暂未更新 · 以下为缓存数据，点击可跳转来源</span>
-                ${fail.length ? `<span class="text-xs text-muted">（${fail.join('、')} 不可用）</span>` : ''}
-            </div>
-            <button onclick="fetchLiveNews()" class="flex items-center gap-1 text-xs text-primary hover:underline">
+        <div class="bg-white rounded-2xl border border-hairline p-8 text-center">
+            <p class="text-sm text-muted">资讯暂未更新，请稍后重试</p>
+            ${fail.length ? `<p class="text-xs text-muted mt-2">（${fail.join('、')} 不可用）</p>` : ''}
+            <button onclick="fetchLiveNews()" class="mt-4 inline-flex items-center gap-1 text-xs text-primary hover:underline">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                 重试
             </button>
         </div>
-        ${mockData.news.map(item => `
-            <article class="news-card bg-white rounded-2xl border border-hairline p-5 cursor-pointer" onclick="window.open('${sourceLinks[item.source] || '#'}', '_blank')">
-                <div class="flex items-start justify-between gap-4 mb-3">
-                    <div class="flex items-center gap-2">
-                        <span class="px-2 py-0.5 text-xs font-medium rounded-md bg-primary/10 text-primary">${item.source}</span>
-                        <span class="text-xs text-muted">${item.time}</span>
-                        <svg class="w-3 h-3 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-                    </div>
-                </div>
-                <h3 class="font-semibold text-ink text-sm leading-relaxed mb-2 line-clamp-2 hover:text-primary transition-colors">${item.title}</h3>
-                <p class="text-sm text-muted leading-relaxed line-clamp-2 mb-3">${item.summary}</p>
-                <div class="flex items-center gap-2 flex-wrap">
-                    ${item.tags.map(tag => `<span class="px-2 py-0.5 text-xs rounded-md bg-surface-strong text-muted">#${tag}</span>`).join('')}
-                </div>
-            </article>
-        `).join('')}
     `;
 }

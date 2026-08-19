@@ -88,6 +88,91 @@ export async function fetchMe() {
     return request('/api/auth/me');
 }
 
+// ---- 客户接口 ----
+export async function fetchClients() {
+    return request('/api/clients');
+}
+
+export async function updateClient(id, patch) {
+    return request(`/api/clients/${id}`, { method: 'PUT', body: JSON.stringify(patch) });
+}
+
+export async function updateClientPositions(id, positions) {
+    return request(`/api/clients/${id}/positions`, { method: 'PUT', body: JSON.stringify({ positions }) });
+}
+
+// ---- 风险预警接口 ----
+export async function evaluateRisk(clientId) {
+    return request(`/api/risk/evaluate/${clientId}`, { method: 'POST' });
+}
+
+export async function fetchClientAlerts(clientId) {
+    return request(`/api/clients/${clientId}/alerts`);
+}
+
+export async function updateAlertStatus(alertId, status) {
+    return request(`/api/alerts/${alertId}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+}
+
+// ---- 用户 / 客户 / 关系映射接口 ----
+export async function fetchUserOptions() {
+    return request('/api/users/options');
+}
+
+export async function createUser(payload) {
+    return request('/api/users', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function createClient(payload) {
+    return request('/api/clients', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function updateClientRelations(id, payload) {
+    return request(`/api/clients/${id}/relations`, { method: 'PUT', body: JSON.stringify(payload) });
+}
+
+export async function deleteClient(id) {
+    return request(`/api/clients/${id}`, { method: 'DELETE' });
+}
+
+export async function importRelations(rows) {
+    return request('/api/relations/import', { method: 'POST', body: JSON.stringify(rows) });
+}
+
+export async function exportRelationsJson() {
+    return request('/api/relations/export');
+}
+
+// ---- CSV 导入/导出（raw 请求，区别于 JSON 请求体） ----
+function authHeaders(extra = {}) {
+    const token = getToken();
+    const headers = { ...extra };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    return headers;
+}
+
+export async function exportRelationsCsv() {
+    const res = await fetch('/api/relations/export/csv', { headers: authHeaders() });
+    if (!res.ok) {
+        const text = await res.text().catch(() => '导出失败');
+        throw new Error(text);
+    }
+    return res.text();
+}
+
+export async function importRelationsCsv(text) {
+    const res = await fetch('/api/relations/import/csv', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'text/csv; charset=utf-8' }),
+        body: text,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        throw new Error(typeof data.detail === 'string' ? data.detail : '导入失败');
+    }
+    return data;
+}
+
 // ---- 站内信接口 ----
 export async function fetchNotifications() {
     return request('/api/notifications');

@@ -8,6 +8,9 @@ from ..models import (
     SUBROLE_CLIENT, SUBROLE_NON_CLIENT, ROLES,
 )
 from ..schemas import UserCreate
+from . import account
+
+MIN_PASSWORD_LENGTH = 6
 
 
 def authenticate(db: Session, username: str, password: str) -> User:
@@ -29,20 +32,43 @@ def _next_user_id(db: Session) -> str:
         count += 1
 
 
-def create_user(db: Session, data: UserCreate) -> User:
+def create_user(db: Session, data: UserCreate) -> tuple[User, str | None]:
+    """创建用户；用户名/密码为空时自动生成。返回 (用户, 初始密码)。
+
+    initial_password 仅当密码为自动生成时非空，用于一次性回传给开户方。
+    """
     if data.role not in ROLES:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="非法角色")
     if data.sub_role is not None and data.sub_role not in (SUBROLE_CLIENT, SUBROLE_NON_CLIENT):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="非法子角色")
     if data.sub_role is not None and data.role != ROLE_USER:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="仅 user 角色可设置子角色")
-    if db.query(User).filter(User.username == data.username).first():
+
+    username = (data.username or "").strip()
+    password = data.password
+    initial_password = None
+
+    if not username:
+        username = account.generate_username(
+            data.name,
+            lambda u: db.query(User).filter(User.username == u).first() is not None,
+        )
+    if not password:
+        password = account.generate_password()
+        initial_password = password
+    elif len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"密码长度至少 {MIN_PASSWORD_LENGTH} 位",
+        )
+
+    if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
 
     user = User(
         id=_next_user_id(db),
-        username=data.username,
-        password_hash=hash_password(data.password),
+        username=username,
+        password_hash=hash_password(password),
         role=data.role,
         sub_role=data.sub_role,
         name=data.name,
@@ -51,7 +77,7 @@ def create_user(db: Session, data: UserCreate) -> User:
     db.add(user)
     db.commit()
     db.refresh(user)
-    return user
+    return user, initial_password
 
 
 # 默认演示账号密码（私有单机环境演示用）

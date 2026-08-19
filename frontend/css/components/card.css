@@ -60,3 +60,27 @@
 .index-card.up::after { background: #cf202f; }
 .index-card.down { background: linear-gradient(135deg, rgba(5, 177, 105, 0.06) 0%, rgba(5, 177, 105, 0.02) 100%); }
 .index-card.down::after { background: #05b169; }
+
+/* 指数成交量图切换按钮 */
+.index-vol-tab {
+    padding: 4px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 999px;
+    border: 1px solid #e2e5e9;
+    background: #ffffff;
+    color: #5b616e;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+.index-vol-tab:hover {
+    border-color: #0052ff;
+    color: #0052ff;
+    background: #f5f8ff;
+}
+.index-vol-tab.active {
+    background: #0052ff;
+    color: #ffffff;
+    border-color: #0052ff;
+}

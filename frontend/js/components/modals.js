@@ -1,14 +1,38 @@
 // ============================================================
 // 持仓弹窗组件：新增/编辑/加仓/减仓/删除
 // ============================================================
-import { getUserPositions, saveUserPositions } from '../services/clientService.js';
+import { getUserPositions, saveUserPositions, getCurrentClient, loadClients } from '../services/clientService.js';
 import { formatCurrency, formatNumber, getPnLColor } from '../core/formatters.js';
 import { SECTORS } from '../core/config.js';
 import { showToast } from '../core/ui.js';
 import { refreshAll } from './overview.js';
+import { canEditClient } from '../permissions/access.js';
+
+function guardEdit() {
+    const c = getCurrentClient();
+    if (!c || !canEditClient(c)) {
+        showToast('❌ 无权限执行此操作', 'error');
+        return false;
+    }
+    return true;
+}
+
+// 持仓回写后端；失败时回滚到后端数据并提示
+async function persistPositions(positions) {
+    try {
+        await saveUserPositions(positions);
+        return true;
+    } catch (e) {
+        showToast('❌ 持仓保存失败：' + (e.message || '未知错误'), 'error');
+        await loadClients();
+        refreshAll();
+        return false;
+    }
+}
 
 // --- 打开持仓弹窗（新增或编辑） ---
 export function openPositionModal(code = null) {
+    if (!guardEdit()) return;
     const isEdit = code !== null;
     let position = null;
     if (isEdit) {
@@ -149,6 +173,7 @@ export function closeAdjustModal() {
 
 // --- 打开加仓/减仓弹窗 ---
 export function openAdjustModal(code, action) {
+    if (!guardEdit()) return;
     const position = getUserPositions().find(p => p.code === code);
     if (!position) { showToast('❌ 未找到该持仓', 'error'); return; }
 
@@ -304,7 +329,8 @@ export function updateAdjustPreview(position, action) {
 }
 
 // --- 执行加仓/减仓 ---
-export function executeAdjust(code, action) {
+export async function executeAdjust(code, action) {
+    if (!guardEdit()) return;
     const qty = parseInt(document.getElementById('adjustQty').value);
     const price = parseFloat(document.getElementById('adjustPrice').value);
 
@@ -348,13 +374,14 @@ export function executeAdjust(code, action) {
         }
     }
 
-    saveUserPositions(positions);
+    if (!(await persistPositions(positions))) return;
     closeAdjustModal();
     refreshAll();
 }
 
 // --- 保存持仓（新增或编辑） ---
-export function savePosition(originalCode = null) {
+export async function savePosition(originalCode = null) {
+    if (!guardEdit()) return;
     const name = document.getElementById('posName').value.trim();
     const code = document.getElementById('posCode').value.trim();
     const quantity = parseInt(document.getElementById('posQuantity').value);
@@ -382,20 +409,21 @@ export function savePosition(originalCode = null) {
         positions.push({ name, code, quantity, costPrice, price, sector });
     }
 
-    saveUserPositions(positions);
+    if (!(await persistPositions(positions))) return;
     closePositionModal();
     refreshAll();
     showToast(originalCode ? '✅ 持仓已更新' : '✅ 持仓已添加', 'success');
 }
 
 // --- 删除持仓 ---
-export function deletePosition(code) {
+export async function deletePosition(code) {
+    if (!guardEdit()) return;
     const position = getUserPositions().find(p => p.code === code);
     if (!position) return;
 
     if (confirm(`确定删除「${position.name}(${position.code})」的持仓吗？`)) {
         let positions = getUserPositions().filter(p => p.code !== code);
-        saveUserPositions(positions);
+        if (!(await persistPositions(positions))) return;
         refreshAll();
         showToast('✅ 持仓已删除', 'success');
     }

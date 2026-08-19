@@ -2,18 +2,19 @@
 // 应用入口：组装所有 ES 模块 + 暴露内联事件处理函数
 // ============================================================
 import { setCurrentDate } from './core/ui.js';
-import { initClients, setCurrentClient, getFilteredClients, clients } from './services/clientService.js';
+import { loadClients, setCurrentClient, getFilteredClients } from './services/clientService.js';
+import { isWorkbenchVisible } from './permissions/access.js';
 import {
     renderMarketTicker, renderClientList, refreshClientDetail,
     toggleWarnOnly, selectClient, addClientTag, removeClientTag,
-    exportClientReport, updateClientNote, resetPositions,
+    exportClientReport, updateClientNote, evaluateClientRisk, handleAlertStatus,
 } from './components/workbench.js';
 import {
     renderVolumeChart, filterPositions, sortTable,
 } from './components/overview.js';
 import {
     renderMarketOverview, refreshMarket, renderSectorHeatmap,
-    renderLeadershipAnalysis, renderDriverAnalysis,
+    renderLeadershipAnalysis, renderDriverAnalysis, initVolumeChartTabs,
 } from './components/market.js';
 import { renderNewsSection } from './components/news.js';
 import { fetchLiveNews } from './services/newsService.js';
@@ -28,11 +29,21 @@ import {
     initAuth, handleLogin, handleLogout, toggleNotificationPanel,
     openNotification, markAllRead,
 } from './components/auth.js';
+import {
+    openAdminPanel, closeAdminPanel, switchAdminTab, refreshAdminPanel,
+    renderRelationList, openRelationModal, closeRelationModal, saveRelation,
+    removeClientRelation, exportRelationsFile, handleRelationImportFile,
+    toggleAccountSubrole, submitAccountForm, copyText as copyTextAdmin,
+} from './components/admin.js';
+import {
+    openOnboarding, closeOnboarding, onboardingNext, onboardingBack,
+    submitOnboarding,
+} from './components/onboarding.js';
 
 // ---- 暴露给内联 onclick 使用（ES module 作用域隔离）----
 Object.assign(window, {
     renderClientList, toggleWarnOnly, selectClient, addClientTag, removeClientTag,
-    exportClientReport, updateClientNote, resetPositions,
+    exportClientReport, updateClientNote, evaluateClientRisk, handleAlertStatus,
     filterPositions, sortTable,
     refreshMarket,
     fetchLiveNews,
@@ -40,6 +51,12 @@ Object.assign(window, {
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, deletePosition,
     handleLogin, handleLogout, toggleNotificationPanel, openNotification, markAllRead,
+    openAdminPanel, closeAdminPanel, switchAdminTab, refreshAdminPanel,
+    renderRelationList, openRelationModal, closeRelationModal, saveRelation,
+    removeClientRelation, exportRelationsFile, handleRelationImportFile,
+    toggleAccountSubrole, submitAccountForm,
+    openOnboarding, closeOnboarding, onboardingNext, onboardingBack, submitOnboarding,
+    copyText: copyTextAdmin,
 });
 
 // --- 顶部导航高亮：点击 + 滚动联动 ---
@@ -74,24 +91,24 @@ function setupNavScrollSpy() {
     onScroll();
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     setCurrentDate();
     setupNavScrollSpy();
     initAuth();
 
-    // 先让骨架屏 paint 一帧，再填充数据
-    setTimeout(() => {
-        initClients();
-        renderMarketTicker();
+    // 从后端加载客户（已按角色过滤），再渲染客户数据
+    await loadClients();
+    renderMarketTicker();
+    if (isWorkbenchVisible()) {
         renderClientList();
-        // 默认选中列表首位（总资产最高）
-        const firstClient = getFilteredClients()[0] || clients[0];
+        const firstClient = getFilteredClients()[0];
         setCurrentClient(firstClient ? firstClient.id : null);
         refreshClientDetail();
-    }, 0);
+    }
 
     renderMarketOverview();       // 今日盯大盘（不依赖客户数据）
     renderVolumeChart();          // 上证成交量图（先渲染模拟数据占位）
+    initVolumeChartTabs();        // 初始化成交量图切换按钮
     renderSectorHeatmap();
     renderLeadershipAnalysis();
     renderDriverAnalysis();

@@ -1,10 +1,10 @@
 // ============================================================
 // 总览组件：统计卡片 / 持仓表格 / 图表 / 行业集中度 / 成交量
 // ============================================================
-import { getUserPositions, saveUserPositions, getUserData } from '../services/clientService.js';
+import { getUserPositions, saveUserPositions, getUserData, getCurrentClient } from '../services/clientService.js';
 import { formatCurrency, formatNumber, getPnLColor, getSectorBadgeClass, getSectorBarColor } from '../core/formatters.js';
-import { mockData } from '../data/mockData.js';
 import { marketDataState } from '../services/marketService.js';
+import { canEditClient } from '../permissions/access.js';
 
 let currentFilter = 'all';
 let sortDirection = {};
@@ -66,13 +66,11 @@ export function renderStatsCards() {
     });
     const totalPnL = totalMarketValue - totalCost;
     const totalPnLPct = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
-    const availableCash = getUserData().availableCash || 100000;
+    const availableCash = getUserData().availableCash || 0;
     const totalAssets = totalMarketValue + availableCash;
 
     const todayPnL = getUserData().todayPnL || totalPnL * 0.05;
     const todayPnLPct = totalAssets > 0 ? (todayPnL / (totalAssets - todayPnL)) * 100 : 0;
-
-    mockData.summary = { totalAssets, todayPnL, todayPnLPct, portfolioReturn: totalPnLPct, availableCash };
 
     const cards = [
         {
@@ -169,6 +167,7 @@ export function renderPositionsTable(filter = 'all') {
     });
 
     const tbody = document.getElementById('positionsBody');
+    const editable = canEditClient(getCurrentClient());
     tbody.innerHTML = positions.map(p => `
         <tr class="table-row-hover border-b border-hairline/60 last:border-0 transition-colors">
             <td class="px-5 py-4">
@@ -199,10 +198,12 @@ export function renderPositionsTable(filter = 'all') {
                 ${(p.marketValue / totalMV * 100).toFixed(1)}%
             </td>
             <td class="px-5 py-4 text-center whitespace-nowrap">
+                ${editable ? `
                 <button onclick="openAdjustModal('${p.code}', 'add')" class="px-2 py-1 text-xs font-medium text-up hover:bg-red-50 rounded-md transition-colors" title="加仓">加仓</button>
                 <button onclick="openAdjustModal('${p.code}', 'reduce')" class="px-2 py-1 text-xs font-medium text-down hover:bg-green-50 rounded-md transition-colors" title="减仓">减仓</button>
                 <button onclick="openPositionModal('${p.code}')" class="px-2 py-1 text-xs font-medium text-primary hover:bg-blue-50 rounded-md transition-colors" title="编辑">编辑</button>
                 <button onclick="deletePosition('${p.code}')" class="px-2 py-1 text-xs font-medium text-muted hover:bg-surface-strong rounded-md transition-colors" title="删除">删除</button>
+                ` : '<span class="text-xs text-muted-soft">只读</span>'}
             </td>
         </tr>
     `).join('');
@@ -214,7 +215,7 @@ export function filterPositions(filter) {
     renderPositionsTable(filter);
 }
 
-export function sortTable(field) {
+export async function sortTable(field) {
     sortDirection[field] = !sortDirection[field];
     let positions = [...getUserPositions()].map(p => ({
         ...p,
@@ -236,7 +237,11 @@ export function sortTable(field) {
         return sortDirection[field] ? valA - valB : valB - valA;
     });
 
-    saveUserPositions(positions.map(({ pnl, pnlPct, marketValue, ...rest }) => rest));
+    try {
+        await saveUserPositions(positions.map(({ pnl, pnlPct, marketValue, ...rest }) => rest));
+    } catch {
+        // 排序持久化失败不阻断展示
+    }
     renderPositionsTable(currentFilter);
 }
 
@@ -266,10 +271,10 @@ export function renderCharts() {
     chartInstances.return = new Chart(returnCtx, {
         type: 'line',
         data: {
-            labels: mockData.returns30d.map(d => d.date),
+            labels: [],
             datasets: [{
                 label: '组合收益',
-                data: mockData.returns30d.map(d => d.value),
+                data: [],
                 borderColor: '#0052ff',
                 backgroundColor: portfolioGradient,
                 borderWidth: 3.5,
@@ -285,7 +290,7 @@ export function renderCharts() {
                 pointBorderWidth: 2,
             }, {
                 label: '沪深300',
-                data: mockData.returns30d.map(d => d.benchmark),
+                data: [],
                 borderColor: '#f4b000',
                 backgroundColor: benchmarkGradient,
                 borderWidth: 2.5,
@@ -414,7 +419,7 @@ export function renderCharts() {
 
     // 3. 每日盈亏柱状图
     const dailyCtx = document.getElementById('dailyPnlChart').getContext('2d');
-    const dailyValues = mockData.dailyPnL.map(d => d.value);
+    const dailyValues = []; // 暂无历史每日盈亏数据
     const dailyBgColors = dailyValues.map(v => v >= 0 ? 'rgba(207, 32, 47, 0.8)' : 'rgba(5, 177, 105, 0.8)');
     const totalPnL = dailyValues.reduce((a, b) => a + b, 0);
 
@@ -424,7 +429,7 @@ export function renderCharts() {
     chartInstances.daily = new Chart(dailyCtx, {
         type: 'bar',
         data: {
-            labels: mockData.dailyPnL.map(d => d.date),
+            labels: [],
             datasets: [{
                 label: '每日盈亏',
                 data: dailyValues,
@@ -476,7 +481,7 @@ export function renderVolumeChart() {
             volume: d.turnover / 1e8,
             changePct: d.changePct
         }))
-        : mockData.shVolume30d.map(d => ({ ...d, changePct: 0 }));
+        : [];
 
     const volColors = volData.map((d, i) => {
         if (d.changePct > 0) return 'rgba(207, 32, 47, 0.75)';

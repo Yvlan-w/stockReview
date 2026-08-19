@@ -4,20 +4,26 @@
 import {
     clients, currentClientId, clientWarnOnly,
     setCurrentClient, setClientWarnOnly, getCurrentClient, clientStats, clientRiskAlerts,
-    getFilteredClients, getClientRelations, saveClients, getUserPositions
+    getFilteredClients, getClientRelations, updateClientRemote, getUserPositions
 } from '../services/clientService.js';
 import { fmtMoney } from '../core/formatters.js';
-import { RISK_BADGE, POSITIONS_STORAGE_KEY } from '../core/config.js';
+import { RISK_BADGE } from '../core/config.js';
 import { showToast } from '../core/ui.js';
-import { mockData } from '../data/mockData.js';
-import { renderStatsCards, renderPositionsTable, renderCharts, renderSectorConcentration, refreshAll } from './overview.js';
+import { marketDataState } from '../services/marketService.js';
+import { renderStatsCards, renderPositionsTable, renderCharts, renderSectorConcentration } from './overview.js';
 import { renderStrategySection } from './strategy.js';
+import { canEditClient, canHandleAlerts } from '../permissions/access.js';
+import { fetchClientAlerts, updateAlertStatus, evaluateRisk } from '../services/authService.js';
 
 // --- 市场环境横条 ---
 export function renderMarketTicker() {
     const el = document.getElementById('marketTicker');
     if (!el) return;
-    const m = mockData.marketOverview || {};
+    const m = marketDataState.realtime;
+    if (!m) {
+        el.innerHTML = '<div class="text-center text-sm text-muted py-2">暂无行情数据</div>';
+        return;
+    }
     const indices = m.indices || [];
     const ticker = indices.map(idx => {
         const isUp = idx.change >= 0;
@@ -76,7 +82,7 @@ export function renderClientList() {
                             ${alerts.length ? '<span class="w-2 h-2 rounded-full bg-negative shrink-0" title="' + alerts.length + ' 项风险"></span>' : ''}
                         </div>
                         <div class="flex items-center gap-1.5 text-xs text-muted">
-                            <span>${c.id}</span><span>·</span><span>${c.age}岁</span><span>·</span>
+                            <span>${c.id}</span><span>·</span><span>${c.age ? c.age + '岁' : '-'}</span><span>·</span>
                             <span class="px-1.5 py-0.5 rounded-md ${RISK_BADGE[c.riskLevel] || 'text-muted'}">${c.riskLevel}</span>
                         </div>
                     </div>
@@ -144,7 +150,7 @@ export function renderClientProfile() {
                         <button onclick="addClientTag()" class="px-2 py-0.5 text-xs text-muted border border-dashed border-hairline rounded-full hover:text-primary hover:border-primary/40 transition-colors">+ 标签</button>
                     </div>
                     <div class="flex items-center gap-3 mt-1.5 text-sm text-muted flex-wrap">
-                        <span>${c.age} 岁</span><span>·</span>
+                        <span>${c.age ? c.age + ' 岁' : '-'}</span><span>·</span>
                         <span>持仓 ${(c.positions || []).length} 只</span><span>·</span>
                         <span>可用资金 <span class="font-mono text-ink">${fmtMoney(c.availableCash)}</span></span>
                     </div>
@@ -183,69 +189,160 @@ export function renderClientProfile() {
 }
 
 // --- 风险预警卡 ---
-export function renderRiskAlerts() {
+const ALERT_STATUS = {
+    open: { label: '待处理', cls: 'bg-negative/10 text-negative' },
+    acknowledged: { label: '已确认', cls: 'bg-warning/10 text-warning' },
+    resolved: { label: '已解决', cls: 'bg-positive/10 text-positive' },
+};
+
+// 从后端读取某客户的预警列表（后端已校验可见性）
+async function loadRiskAlerts(clientId) {
+    try {
+        return await fetchClientAlerts(clientId);
+    } catch (e) {
+        console.warn('加载风险预警失败:', e);
+        return [];
+    }
+}
+
+export async function renderRiskAlerts() {
     const el = document.getElementById('riskAlertCard');
     if (!el) return;
     el.classList.remove('animate-pulse');
     const c = getCurrentClient();
     if (!c) { el.innerHTML = ''; return; }
-    const alerts = clientRiskAlerts(c);
+    const clientId = c.id;
+
+    const alerts = await loadRiskAlerts(clientId);
+    // 切换客户后丢弃过期请求结果
+    if (getCurrentClient()?.id !== clientId) return;
+
+    const canHandle = canHandleAlerts();
+
     if (!alerts.length) {
-        el.innerHTML = `<div class="premium-card px-5 py-4 flex items-center gap-3 border-positive/20">
-            <svg class="w-5 h-5 text-positive" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-            <span class="text-sm text-body">该客户组合当前无重大风险预警</span>
+        el.innerHTML = `<div class="premium-card px-5 py-4 flex items-center justify-between gap-3 border-positive/20">
+            <div class="flex items-center gap-3">
+                <svg class="w-5 h-5 text-positive" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <span class="text-sm text-body">该客户组合当前无重大风险预警</span>
+            </div>
+            ${canHandle ? `<button onclick="evaluateClientRisk()" class="px-3 py-1.5 text-xs font-medium rounded-lg border border-hairline text-muted hover:text-primary hover:border-primary/40 transition-colors">立即评估</button>` : ''}
         </div>`;
         return;
     }
+
     el.innerHTML = `<div class="premium-card p-5 border-negative/20">
         <div class="flex items-center gap-2 mb-3">
             <svg class="w-4 h-4 text-negative" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
             <h3 class="text-sm font-semibold text-ink">风险预警</h3>
             <span class="text-xs text-negative font-mono">${alerts.length} 项</span>
+            ${canHandle ? `<button onclick="evaluateClientRisk()" class="ml-auto px-3 py-1 text-xs font-medium rounded-lg border border-hairline text-muted hover:text-primary hover:border-primary/40 transition-colors">重新评估</button>` : ''}
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            ${alerts.map(a => `<div class="flex items-start gap-2.5 p-3 rounded-xl bg-negative/5 border border-negative/10">
-                <span class="w-2 h-2 rounded-full ${a.level === 'high' ? 'bg-negative' : 'bg-warning'} mt-1.5 shrink-0"></span>
-                <div>
-                    <div class="text-sm font-medium text-ink">${a.title}</div>
-                    <div class="text-xs text-muted mt-0.5">${a.desc}</div>
-                </div>
-            </div>`).join('')}
+            ${alerts.map(a => renderAlertCard(a, canHandle)).join('')}
         </div>
     </div>`;
 }
 
+function renderAlertCard(a, canHandle) {
+    const status = ALERT_STATUS[a.status] || { label: a.status || '未知', cls: 'bg-surface-strong text-muted' };
+    const levelDot = a.level === 'high' ? 'bg-negative' : 'bg-warning';
+    return `<div class="flex items-start gap-2.5 p-3 rounded-xl bg-negative/5 border border-negative/10">
+        <span class="w-2 h-2 rounded-full ${levelDot} mt-1.5 shrink-0"></span>
+        <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-sm font-medium text-ink">${a.title}</span>
+                <span class="px-1.5 py-0.5 text-xs font-medium rounded-md ${status.cls}">${status.label}</span>
+            </div>
+            <div class="text-xs text-muted mt-0.5">${a.description}</div>
+            ${canHandle && a.status !== 'resolved' ? `
+                <div class="flex items-center gap-2 mt-2">
+                    ${a.status === 'open' ? `<button onclick="handleAlertStatus(${a.id},'acknowledged')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-warning/10 text-warning hover:bg-warning/20 transition-colors">确认</button>` : ''}
+                    <button onclick="handleAlertStatus(${a.id},'resolved')" class="px-2.5 py-1 text-xs font-medium rounded-lg bg-positive/10 text-positive hover:bg-positive/20 transition-colors">解决</button>
+                </div>` : ''}
+        </div>
+    </div>`;
+}
+
+// 触发风险评估（仅客服/顾问/管理员）
+export async function evaluateClientRisk() {
+    const c = getCurrentClient();
+    if (!c || !canHandleAlerts()) { showToast('❌ 无权限执行此操作', 'error'); return; }
+    try {
+        await evaluateRisk(c.id);
+        showToast('✅ 风险评估已完成', 'success');
+        await renderRiskAlerts();
+    } catch (e) {
+        showToast('❌ 风险评估失败：' + (e.message || '未知错误'), 'error');
+    }
+}
+
+// 更新预警状态（确认/解决），仅客服/顾问/管理员
+export async function handleAlertStatus(alertId, status) {
+    if (!canHandleAlerts()) { showToast('❌ 无权限执行此操作', 'error'); return; }
+    try {
+        await updateAlertStatus(alertId, status);
+        showToast('✅ 预警状态已更新', 'success');
+        await renderRiskAlerts();
+    } catch (e) {
+        showToast('❌ 操作失败：' + (e.message || '未知错误'), 'error');
+    }
+}
+
 // --- 备注 / 标签 ---
-export function updateClientNote(val) {
+function guardEdit() {
+    const c = getCurrentClient();
+    if (!c || !canEditClient(c)) {
+        showToast('❌ 无权限执行此操作', 'error');
+        return false;
+    }
+    return true;
+}
+
+export async function updateClientNote(val) {
+    if (!guardEdit()) return;
     const c = getCurrentClient();
     if (!c) return;
     c.note = val;
-    saveClients();
-    showToast('✅ 备注已保存', 'success');
+    try {
+        await updateClientRemote(c.id, { note: val });
+        showToast('✅ 备注已保存', 'success');
+    } catch (e) {
+        showToast('❌ 备注保存失败：' + (e.message || '未知错误'), 'error');
+    }
 }
 
-export function addClientTag() {
+export async function addClientTag() {
+    if (!guardEdit()) return;
     const c = getCurrentClient();
     if (!c) return;
     const tag = prompt('输入新标签（如 VIP / 待跟进）');
     if (tag && tag.trim()) {
         const t = tag.trim();
         if (!c.tags.includes(t)) c.tags.push(t);
-        saveClients();
-        renderClientProfile();
-        renderClientList();
-        showToast('✅ 标签已添加', 'success');
+        try {
+            await updateClientRemote(c.id, { tags: c.tags });
+            renderClientProfile();
+            renderClientList();
+            showToast('✅ 标签已添加', 'success');
+        } catch (e) {
+            showToast('❌ 标签保存失败：' + (e.message || '未知错误'), 'error');
+        }
     }
 }
 
-export function removeClientTag(tag) {
+export async function removeClientTag(tag) {
+    if (!guardEdit()) return;
     const c = getCurrentClient();
     if (!c) return;
     c.tags = (c.tags || []).filter(t => t !== tag);
-    saveClients();
-    renderClientProfile();
-    renderClientList();
-    showToast('✅ 标签已移除', 'success');
+    try {
+        await updateClientRemote(c.id, { tags: c.tags });
+        renderClientProfile();
+        renderClientList();
+        showToast('✅ 标签已移除', 'success');
+    } catch (e) {
+        showToast('❌ 标签保存失败：' + (e.message || '未知错误'), 'error');
+    }
 }
 
 // --- 导出客户报告（独立 HTML，可 Ctrl+P 转 PDF） ---
@@ -290,7 +387,7 @@ export function exportClientReport() {
         @media print{body{padding:16px}}
     </style></head><body>
         <h1>客户持仓报告</h1>
-        <div class="meta">客户：${c.name}（${c.id}）· ${c.age} 岁 · ${c.riskLevel} · 报告日期 ${dateStr}</div>
+        <div class="meta">客户：${c.name}（${c.id}）· ${c.age ? c.age + ' 岁' : '年龄未填'} · ${c.riskLevel} · 报告日期 ${dateStr}</div>
         <div class="stats">
             <div class="stat"><div class="v">${fmtMoney(s.totalAssets)}</div><div class="l">总资产</div></div>
             <div class="stat"><div class="v" style="color:${pnlColor}">${s.totalPnl >= 0 ? '+' : ''}${fmtMoney(s.totalPnl)}</div><div class="l">持仓盈亏 (${s.totalPnlPct >= 0 ? '+' : ''}${s.totalPnlPct.toFixed(1)}%)</div></div>
@@ -315,13 +412,4 @@ export function exportClientReport() {
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     showToast('✅ 客户报告已生成，打开后 Ctrl+P 可另存为 PDF', 'success');
-}
-
-// --- 恢复示例持仓 ---
-export function resetPositions() {
-    if (confirm('确定恢复为示例持仓数据吗？当前持仓将被覆盖。')) {
-        localStorage.removeItem(POSITIONS_STORAGE_KEY);
-        refreshAll();
-        showToast('✅ 已恢复示例数据', 'success');
-    }
 }

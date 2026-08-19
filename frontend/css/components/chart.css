@@ -1,5 +1,5 @@
 /* ============================================================
- * 图表 / 板块热力条 / 装饰背景
+ * 图表 / 板块热力条 / Treemap / 装饰背景
  * ============================================================ */
 .chart-container { position: relative; height: 280px; }
 
@@ -8,14 +8,118 @@
     background-size: 24px 24px;
 }
 
-.sector-bar-track {
-    background: rgba(0, 0, 0, 0.03);
-    border-radius: 6px;
-    overflow: hidden;
+/* --- 板块 Treemap --- */
+.sector-treemap {
     position: relative;
+    width: 100%;
+    height: 520px;
+    font-size: 11px;
+    line-height: 1.3;
+    background: rgba(0, 0, 0, 0.02);
+    border-radius: 8px;
+    overflow: hidden;
 }
-.sector-bar-fill {
-    height: 100%;
-    border-radius: 6px;
-    transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+.sector-treemap-block {
+    position: absolute;
+    border-radius: 2px;
+    padding: 4px 6px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: filter 0.15s ease, z-index 0s;
+    overflow: hidden;
+    min-height: 0;
+    box-sizing: border-box;
+}
+.sector-treemap-block:hover {
+    filter: brightness(1.1);
+    z-index: 10;
+    box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.15);
+}
+.sector-treemap-block .tm-name {
+    font-weight: 600;
+    color: #1a1a1a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.sector-treemap-block .tm-pct {
+    font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+    font-weight: 700;
+    font-size: 12px;
+}
+.sector-treemap-block .tm-turnover {
+    font-size: 10px;
+    color: #666;
+    font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+}
+.sector-treemap-block .tm-label-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.sector-treemap-block .tm-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+}
+.sector-treemap-small .tm-name { font-size: 10px; }
+.sector-treemap-small .tm-pct { font-size: 11px; }
+.sector-treemap-tiny .tm-name { display: none; }
+.sector-treemap-tiny .tm-pct { font-size: 10px; }
+
+/* --- Treemap 自定义浮窗 --- */
+.sector-tooltip {
+    position: fixed;
+    z-index: 9999;
+    min-width: 160px;
+    max-width: 220px;
+    padding: 12px 14px;
+    background: #ffffff;
+    border: 1px solid #eceef1;
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    backdrop-filter: blur(8px);
+}
+.sector-tooltip-header {
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #f0f2f5;
+}
+.sector-tooltip-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: #0a0b0d;
+    letter-spacing: 0.01em;
+}
+.sector-tooltip-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 2px 0;
+}
+.sector-tooltip-label {
+    font-size: 12px;
+    color: #7c828a;
+}
+.sector-tooltip-value {
+    font-size: 13px;
+    font-weight: 600;
+    color: #0a0b0d;
+    font-family: 'JetBrains Mono', 'Menlo', 'Monaco', monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+.sector-row {
+    transition: transform 0.15s ease;
+}
+.sector-row:hover {
+    transform: translateX(2px);
 }
