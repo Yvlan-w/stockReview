@@ -15,6 +15,7 @@ from .config import (
     FRONTEND_DIR, MARKET_REFRESH_INTERVAL_REALTIME, MARKET_REFRESH_INTERVAL_REALTIME_OFF,
     MARKET_REFRESH_INTERVAL_KLINE, MARKET_REFRESH_INTERVAL_SECTOR,
     MARKET_REFRESH_INTERVAL_SECTOR_OFF,
+    STOCK_REFRESH_INTERVAL, STOCK_REFRESH_INTERVAL_OFF,
 )
 from .database import Base, SessionLocal, engine
 from .services import market_service
@@ -89,6 +90,43 @@ async def _sector_refresh_loop():
             logger.warning("板块刷新异常（继续）: %s", e)
 
 
+async def _stock_price_refresh_loop():
+    """个股行情：交易期每 20s 刷一次，非交易期每 120s。刷新后写入当日盈亏快照。"""
+    await asyncio.sleep(6)
+    try:
+        from .services.stock_price_service import refresh_stock_prices
+        await refresh_stock_prices()
+    except Exception as e:
+        logger.warning("启动时个股行情初始刷新失败: %s", e)
+
+    while True:
+        try:
+            interval = (STOCK_REFRESH_INTERVAL
+                        if market_service.is_trading_hours()
+                        else STOCK_REFRESH_INTERVAL_OFF)
+            await asyncio.sleep(interval)
+
+            # 刷新个股行情
+            from .services.stock_price_service import refresh_stock_prices
+            from .services.pnl_service import write_all_daily_snapshots
+            db = SessionLocal()
+            try:
+                try:
+                    await refresh_stock_prices(db)
+                except Exception as e:
+                    # 行情刷新失败不阻断快照写入（compute_portfolio 有降级价格链）
+                    logger.warning("个股行情刷新失败（快照仍按降级价格写入）: %s", e)
+                # 写入当日盈亏快照（无论行情刷新是否成功，均有价格降级链兜底）
+                write_all_daily_snapshots(db)
+            finally:
+                db.close()
+
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning("个股行情刷新异常（继续）: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -98,10 +136,11 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    # 三个独立的后台刷新循环
+    # 四个独立的后台刷新循环
     _bg_tasks.append(asyncio.create_task(_realtime_refresh_loop(), name="market-realtime"))
     _bg_tasks.append(asyncio.create_task(_kline_refresh_loop(), name="market-kline"))
     _bg_tasks.append(asyncio.create_task(_sector_refresh_loop(), name="market-sector"))
+    _bg_tasks.append(asyncio.create_task(_stock_price_refresh_loop(), name="stock-price"))
 
     yield
 

@@ -205,12 +205,16 @@ KLINE_SOURCE_BUILDERS = [
 # ---------------------------------------------------------------------------
 async def _fetch_json(url: str, timeout: int = MARKET_HTTP_TIMEOUT) -> dict:
     """后端 HTTP fetch（无浏览器介入，无 CORS/Referer 问题）。"""
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, connect=10),
+        follow_redirects=True
+    ) as client:
         resp = await client.get(url, headers={
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
+            "Referer": "https://quote.eastmoney.com/",
         })
         resp.raise_for_status()
         return resp.json()

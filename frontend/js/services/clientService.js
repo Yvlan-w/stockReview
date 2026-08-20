@@ -4,6 +4,7 @@
 import { ADVISOR_POOL, SERVICE_STAFF_POOL } from '../core/config.js';
 import { getVisibleClients } from '../permissions/access.js';
 import { fetchClients, updateClient, updateClientPositions, isLoggedIn } from './authService.js';
+import { getPriceMap } from './priceService.js';
 
 // 分享版注入数据：由 index.html 内联脚本挂载到 window，导出分享版时会被替换为真实数据。
 const EMBEDDED_POSITIONS = window.EMBEDDED_POSITIONS;
@@ -14,6 +15,10 @@ export let clients = [];
 export let currentClientId = null;
 export let clientWarnOnly = false;
 export let clientTagEditId = null;
+
+// ---- 组合估值 & 盈亏历史 实时数据 ----
+export let portfolioData = null;
+export let pnlHistoryData = null;
 
 // 后端返回的客户字段（snake_case）→ 前端渲染字段（camelCase）
 function mapClient(raw) {
@@ -30,9 +35,44 @@ function mapClient(raw) {
         serviceIds: raw.service_ids || [],
         positions: (raw.positions || []).map(p => ({
             name: p.name, code: p.code, sector: p.sector,
-            quantity: p.quantity, costPrice: p.cost_price, price: p.price,
+            quantity: p.quantity, costPrice: p.cost_price,
+            // 现价不再由后端持久化，通过 priceService 实时获取（降级用 costPrice）
         })),
     };
+}
+
+// 加载客户实时组合估值
+export async function fetchClientPortfolio(id) {
+    if (!id) return null;
+    try {
+        const resp = await fetch(`/api/clients/${id}/portfolio`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}` }
+        });
+        if (resp.ok) {
+            portfolioData = await resp.json();
+            return portfolioData;
+        }
+    } catch (e) {
+        console.warn('加载组合估值失败:', e);
+    }
+    return null;
+}
+
+// 加载客户盈亏历史
+export async function fetchClientPnlHistory(id, rangeDays = 30) {
+    if (!id) return null;
+    try {
+        const resp = await fetch(`/api/clients/${id}/pnl-history?range=${rangeDays}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}` }
+        });
+        if (resp.ok) {
+            pnlHistoryData = await resp.json();
+            return pnlHistoryData;
+        }
+    } catch (e) {
+        console.warn('加载盈亏历史失败:', e);
+    }
+    return null;
 }
 
 // 从后端加载客户（后端已按角色做行级过滤，前端直接信任返回结果）
@@ -69,13 +109,14 @@ export function setCurrentClient(id) { currentClientId = id; }
 
 export function setClientWarnOnly(val) { clientWarnOnly = !!val; }
 
-// 客户资产 / 盈亏统计
+// 客户资产 / 盈亏统计（实时价格降级链：实时行情 → 成本价兜底）
 export function clientStats(client) {
     if (!client) return { totalMarket: 0, totalCost: 0, totalPnl: 0, totalPnlPct: 0, totalAssets: 0, positions: [] };
     const positions = Array.isArray(client.positions) ? client.positions : [];
+    const prices = getPriceMap(positions);
     let totalMarket = 0, totalCost = 0;
     positions.forEach(p => {
-        totalMarket += p.price * p.quantity;
+        totalMarket += prices[p.code] * p.quantity;
         totalCost += p.costPrice * p.quantity;
     });
     const totalPnl = totalMarket - totalCost;
@@ -87,12 +128,13 @@ export function clientStats(client) {
     };
 }
 
-// 客户风险预警计算
+// 客户风险预警计算（实时价格降级链）
 export function clientRiskAlerts(client) {
     const alerts = [];
     if (!client) return alerts;
     const s = clientStats(client);
     const positions = s.positions || [];
+    const prices = getPriceMap(positions);
     // 亏损超阈值：总亏损 > -8%
     if (s.totalPnl < 0 && s.totalPnlPct <= -8) {
         alerts.push({ type: 'loss', level: 'high', title: '组合亏损超阈值', desc: '累计亏损 ' + s.totalPnlPct.toFixed(1) + '%，建议关注止损与调仓' });
@@ -101,7 +143,7 @@ export function clientRiskAlerts(client) {
     }
     // 行业集中度 > 50%
     const sectorMap = {};
-    positions.forEach(p => { sectorMap[p.sector] = (sectorMap[p.sector] || 0) + p.price * p.quantity; });
+    positions.forEach(p => { sectorMap[p.sector] = (sectorMap[p.sector] || 0) + prices[p.code] * p.quantity; });
     const topSector = Object.entries(sectorMap).sort((a, b) => b[1] - a[1])[0];
     if (topSector && s.totalMarket > 0) {
         const pct = topSector[1] / s.totalMarket * 100;
@@ -109,13 +151,13 @@ export function clientRiskAlerts(client) {
     }
     // 单票占比 > 40%
     positions.forEach(p => {
-        if (s.totalMarket > 0 && p.price * p.quantity / s.totalMarket * 100 > 40) {
-            alerts.push({ type: 'stock', level: 'high', title: '单票占比过高', desc: p.name + ' 占比 ' + (p.price * p.quantity / s.totalMarket * 100).toFixed(0) + '%，集中持仓风险高' });
+        if (s.totalMarket > 0 && prices[p.code] * p.quantity / s.totalMarket * 100 > 40) {
+            alerts.push({ type: 'stock', level: 'high', title: '单票占比过高', desc: p.name + ' 占比 ' + (prices[p.code] * p.quantity / s.totalMarket * 100).toFixed(0) + '%，集中持仓风险高' });
         }
     });
     // 亏损单只 > 20%
     positions.forEach(p => {
-        const pnlPct = (p.price - p.costPrice) / p.costPrice * 100;
+        const pnlPct = (prices[p.code] - p.costPrice) / p.costPrice * 100;
         if (pnlPct <= -20) alerts.push({ type: 'stock', level: 'mid', title: '个股深度亏损', desc: p.name + ' 亏损 ' + pnlPct.toFixed(1) + '%' });
     });
     return alerts;
@@ -137,9 +179,32 @@ export async function saveUserPositions(positions) {
     client.positions = positions;
     const payload = positions.map(p => ({
         name: p.name, code: p.code, sector: p.sector,
-        quantity: p.quantity, cost_price: p.costPrice, price: p.price,
+        quantity: p.quantity, cost_price: p.costPrice,
     }));
     await updateClientPositions(client.id, payload);
+}
+
+// 保存交易记录（买入/卖出）
+export async function saveTransaction(clientId, txData) {
+    if (!clientId) return null;
+    try {
+        const resp = await fetch(`/api/clients/${clientId}/transactions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}`
+            },
+            body: JSON.stringify(txData)
+        });
+        if (resp.ok) {
+            return await resp.json();
+        } else {
+            console.warn('保存交易记录失败:', resp.status, await resp.text());
+        }
+    } catch (e) {
+        console.warn('保存交易记录异常:', e);
+    }
+    return null;
 }
 
 // 获取 / 保存其它用户数据（可用资金等）

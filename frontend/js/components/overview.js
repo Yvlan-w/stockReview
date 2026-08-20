@@ -5,13 +5,15 @@ import { getUserPositions, saveUserPositions, getUserData, getCurrentClient } fr
 import { formatCurrency, formatNumber, getPnLColor, getSectorBadgeClass, getSectorBarColor } from '../core/formatters.js';
 import { marketDataState } from '../services/marketService.js';
 import { canEditClient } from '../permissions/access.js';
+import { getPrice, getPriceMap } from '../services/priceService.js';
 
 let currentFilter = 'all';
 let sortDirection = {};
 let chartInstances = {}; // 存储图表实例用于销毁重建
+let currentPortfolio = null; // 存储当前portfolio数据供筛选/排序使用
 
 // --- 行业集中度 ---
-export function renderSectorConcentration() {
+export function renderSectorConcentration(portfolio = null) {
     const positions = getUserPositions();
     const container = document.getElementById('sectorConcentration');
     const hintEl = document.getElementById('topSectorHint');
@@ -22,10 +24,20 @@ export function renderSectorConcentration() {
         return;
     }
 
+    // 构建实时价格映射
+    const priceMap = {};
+    if (portfolio && portfolio.positions) {
+        portfolio.positions.forEach(p => {
+            priceMap[p.code] = p;
+        });
+    }
+
     const sectorMap = {};
     let totalMV = 0;
     positions.forEach(p => {
-        const mv = p.price * p.quantity;
+        const realtime = priceMap[p.code];
+        const currentPrice = realtime?.currentPrice || getPrice(p.code, p.costPrice);
+        const mv = currentPrice * p.quantity;
         sectorMap[p.sector] = (sectorMap[p.sector] || 0) + mv;
         totalMV += mv;
     });
@@ -56,21 +68,40 @@ export function renderSectorConcentration() {
 }
 
 // --- 统计卡片 ---
-export function renderStatsCards() {
-    const positions = getUserPositions();
+export function renderStatsCards(portfolio) {
     let totalMarketValue = 0;
     let totalCost = 0;
-    positions.forEach(p => {
-        totalMarketValue += p.price * p.quantity;
-        totalCost += p.costPrice * p.quantity;
-    });
-    const totalPnL = totalMarketValue - totalCost;
-    const totalPnLPct = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
-    const availableCash = getUserData().availableCash || 0;
-    const totalAssets = totalMarketValue + availableCash;
+    let totalPnL = 0;
+    let totalPnLPct = 0;
+    let availableCash = 0;
+    let totalAssets = 0;
+    let todayPnL = 0;
+    let todayPnLPct = 0;
 
-    const todayPnL = getUserData().todayPnL || totalPnL * 0.05;
-    const todayPnLPct = totalAssets > 0 ? (todayPnL / (totalAssets - todayPnL)) * 100 : 0;
+    if (portfolio) {
+        // 使用后端实时数据
+        totalMarketValue = portfolio.totalMarketValue || 0;
+        totalCost = portfolio.totalCost || 0;
+        totalPnL = portfolio.totalPnl || 0;
+        totalPnLPct = portfolio.totalPnlPct || 0;
+        availableCash = portfolio.availableCash || 0;
+        totalAssets = portfolio.totalAssets || 0;
+        todayPnL = portfolio.todayPnl || 0;
+        todayPnLPct = portfolio.todayPnlPct || 0;
+    } else {
+        // 降级：实时价格服务（缓存 → 成本价兜底）
+        const positions = getUserPositions();
+        positions.forEach(p => {
+            totalMarketValue += getPrice(p.code, p.costPrice) * p.quantity;
+            totalCost += p.costPrice * p.quantity;
+        });
+        totalPnL = totalMarketValue - totalCost;
+        totalPnLPct = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
+        availableCash = getUserData().availableCash || 0;
+        totalAssets = totalMarketValue + availableCash;
+        todayPnL = getUserData().todayPnL || totalPnL * 0.05;
+        todayPnLPct = totalAssets > 0 ? (todayPnL / (totalAssets - todayPnL)) * 100 : 0;
+    }
 
     const cards = [
         {
@@ -85,7 +116,7 @@ export function renderStatsCards() {
         {
             icon: `<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>`,
             label: '持仓盈亏',
-            value: `${totalPnL >= 0 ? '+' : ''}¥${formatCurrency(totalPnL)}`,
+            value: `${totalPnL >= 0 ? '+' : '-'}¥${formatCurrency(totalPnL)}`,
             subText: `${totalPnLPct >= 0 ? '+' : ''}${totalPnLPct.toFixed(2)}%`,
             accent: totalPnL >= 0 ? 'up' : 'down',
             iconBg: totalPnL >= 0 ? 'bg-red-50' : 'bg-green-50',
@@ -128,29 +159,71 @@ export function renderStatsCards() {
 }
 
 // --- 持仓表格 ---
-export function renderPositionsTable(filter = 'all') {
+export function renderPositionsTable(filter = 'all', portfolio) {
     currentFilter = filter;
     let positions = [...getUserPositions()];
 
-    positions = positions.map(p => ({
-        ...p,
-        pnl: (p.price - p.costPrice) * p.quantity,
-        pnlPct: ((p.price - p.costPrice) / p.costPrice) * 100,
-        marketValue: p.price * p.quantity
-    }));
+    // 如果有实时数据，优先使用实时价格
+    const priceMap = {};
+    if (portfolio && portfolio.positions) {
+        portfolio.positions.forEach(p => {
+            priceMap[p.code] = p;
+        });
+    }
 
+    positions = positions.map(p => {
+        const realtime = priceMap[p.code];
+        const currentPrice = realtime?.currentPrice || getPrice(p.code, p.costPrice);
+        // 安全计算盈亏：处理 null/undefined
+        const safePnl = realtime?.pnl !== null && realtime?.pnl !== undefined
+            ? realtime.pnl
+            : (currentPrice - p.costPrice) * p.quantity;
+        const safePnlPct = realtime?.pnlPct !== null && realtime?.pnlPct !== undefined
+            ? realtime.pnlPct
+            : p.costPrice > 0 ? ((currentPrice - p.costPrice) / p.costPrice) * 100 : 0;
+        const marketValue = currentPrice * p.quantity;
+        const todayPnl = realtime?.todayPnl !== null && realtime?.todayPnl !== undefined
+            ? realtime.todayPnl
+            : 0;
+        return {
+            ...p,
+            price: currentPrice,
+            pnl: safePnl,
+            pnlPct: safePnlPct,
+            marketValue,
+            todayPnl
+        };
+    });
+
+    // 先计算总市值（用于占比计算）
     const totalMV = positions.reduce((sum, p) => sum + p.marketValue, 0);
 
-    if (filter === 'profit') positions = positions.filter(p => p.pnl > 0);
-    else if (filter === 'loss') positions = positions.filter(p => p.pnl < 0);
+    // 应用筛选（安全处理 null/undefined）
+    let filteredPositions = positions;
+    if (filter === 'profit') filteredPositions = positions.filter(p => (p.pnl ?? 0) > 0);
+    else if (filter === 'loss') filteredPositions = positions.filter(p => (p.pnl ?? 0) < 0);
 
-    document.getElementById('positionCount').textContent = getUserPositions().length;
+    // 更新持仓数量显示为筛选后的数量
+    document.getElementById('positionCount').textContent = filteredPositions.length;
 
     const emptyState = document.getElementById('emptyState');
     const tableContainer = document.querySelector('#positions .overflow-x-auto');
-    if (getUserPositions().length === 0) {
+    if (filteredPositions.length === 0) {
         emptyState.classList.remove('hidden');
         tableContainer.parentElement.classList.add('hidden');
+        // 更新空状态文案
+        const emptyTitle = emptyState.querySelector('h3');
+        const emptyDesc = emptyState.querySelector('p');
+        if (filter === 'profit') {
+            emptyTitle.textContent = '暂无盈利持仓';
+            emptyDesc.textContent = '当前没有盈利的股票';
+        } else if (filter === 'loss') {
+            emptyTitle.textContent = '暂无亏损持仓';
+            emptyDesc.textContent = '当前没有亏损的股票';
+        } else {
+            emptyTitle.textContent = '暂无持仓数据';
+            emptyDesc.textContent = '点击「添加持仓」录入您的第一只股票';
+        }
     } else {
         emptyState.classList.add('hidden');
         tableContainer.parentElement.classList.remove('hidden');
@@ -168,7 +241,7 @@ export function renderPositionsTable(filter = 'all') {
 
     const tbody = document.getElementById('positionsBody');
     const editable = canEditClient(getCurrentClient());
-    tbody.innerHTML = positions.map(p => `
+    tbody.innerHTML = filteredPositions.map(p => `
         <tr class="table-row-hover border-b border-hairline/60 last:border-0 transition-colors">
             <td class="px-5 py-4">
                 <div class="flex items-center gap-3">
@@ -189,13 +262,16 @@ export function renderPositionsTable(filter = 'all') {
             <td class="px-5 py-4 text-right font-mono text-sm text-body">¥${formatNumber(p.costPrice)}</td>
             <td class="px-5 py-4 text-right font-mono text-sm font-medium text-ink">¥${formatNumber(p.price)}</td>
             <td class="px-5 py-4 text-right font-mono text-sm font-semibold ${getPnLColor(p.pnl)}">
-                ${p.pnl >= 0 ? '+' : ''}¥${formatCurrency(p.pnl)}
+                ${p.pnl >= 0 ? '+' : '-'}¥${formatCurrency(Math.abs(p.pnl))}
             </td>
             <td class="px-5 py-4 text-right font-mono text-sm font-semibold ${getPnLColor(p.pnlPct)}">
-                ${p.pnlPct >= 0 ? '+' : ''}${p.pnlPct.toFixed(2)}%
+                ${p.pnlPct >= 0 ? '+' : ''}${(p.pnlPct ?? 0).toFixed(2)}%
+            </td>
+            <td class="px-5 py-4 text-right font-mono text-sm ${getPnLColor(p.todayPnl)}">
+                ${p.todayPnl >= 0 ? '+' : '-'}¥${formatCurrency(Math.abs(p.todayPnl))}
             </td>
             <td class="px-5 py-4 text-right text-sm text-muted hidden lg:table-cell">
-                ${(p.marketValue / totalMV * 100).toFixed(1)}%
+                ${totalMV > 0 ? (p.marketValue / totalMV * 100).toFixed(1) : '0.0'}%
             </td>
             <td class="px-5 py-4 text-center whitespace-nowrap">
                 ${editable ? `
@@ -208,45 +284,11 @@ export function renderPositionsTable(filter = 'all') {
         </tr>
     `).join('');
 
-    renderSectorConcentration();
-}
-
-export function filterPositions(filter) {
-    renderPositionsTable(filter);
-}
-
-export async function sortTable(field) {
-    sortDirection[field] = !sortDirection[field];
-    let positions = [...getUserPositions()].map(p => ({
-        ...p,
-        pnl: (p.price - p.costPrice) * p.quantity,
-        pnlPct: ((p.price - p.costPrice) / p.costPrice) * 100,
-        marketValue: p.price * p.quantity
-    }));
-
-    positions.sort((a, b) => {
-        let valA, valB;
-        switch (field) {
-            case 'name': valA = a.name; valB = b.name; break;
-            case 'quantity': valA = a.quantity; valB = b.quantity; break;
-            case 'price': valA = a.price; valB = b.price; break;
-            case 'pnl': valA = a.pnl; valB = b.pnl; break;
-            default: return 0;
-        }
-        if (typeof valA === 'string') return sortDirection[field] ? valA.localeCompare(valB, 'zh') : valB.localeCompare(valA, 'zh');
-        return sortDirection[field] ? valA - valB : valB - valA;
-    });
-
-    try {
-        await saveUserPositions(positions.map(({ pnl, pnlPct, marketValue, ...rest }) => rest));
-    } catch {
-        // 排序持久化失败不阻断展示
-    }
-    renderPositionsTable(currentFilter);
+    renderSectorConcentration(portfolio);
 }
 
 // --- 图表（支持重建） ---
-export function renderCharts() {
+export function renderCharts(pnlHistory, portfolio = null) {
     Object.values(chartInstances).forEach(chart => {
         if (chart && typeof chart.destroy === 'function') chart.destroy();
     });
@@ -256,6 +298,41 @@ export function renderCharts() {
     Chart.defaults.color = '#7c828a';
 
     const userPositions = getUserPositions();
+
+    // 构建实时价格映射（优先使用后端实时数据）
+    const priceMap = {};
+    if (portfolio && portfolio.positions) {
+        portfolio.positions.forEach(p => {
+            priceMap[p.code] = p;
+        });
+    }
+
+    // 计算持仓市值时优先使用实时价格
+    const positionsWithRealtime = userPositions.map(p => {
+        const realtime = priceMap[p.code];
+        const currentPrice = realtime?.currentPrice || getPrice(p.code, p.costPrice);
+        const marketValue = currentPrice * p.quantity;
+        return { ...p, currentPrice, marketValue };
+    });
+
+    // 解析盈亏历史数据
+    let historyLabels = [];
+    let portfolioData = [];
+    let benchmarkData = [];
+    let dailyPnlData = [];
+
+    if (pnlHistory && pnlHistory.dates && pnlHistory.dates.length > 0) {
+        historyLabels = pnlHistory.dates;
+        portfolioData = pnlHistory.cumulativeReturnPct || [];
+        benchmarkData = pnlHistory.benchmarkReturn || [];
+        dailyPnlData = pnlHistory.dailyPnl || [];
+    }
+
+    // x 轴显示标签：YYYY-MM-DD → MM-DD（节省空间，保证更多交易日刻度可见）
+    const displayLabels = historyLabels.map(d => {
+        const parts = String(d).split('-');
+        return parts.length === 3 ? `${parts[1]}-${parts[2]}` : d;
+    });
 
     // 1. 收益曲线
     const returnCtx = document.getElementById('returnChart').getContext('2d');
@@ -271,10 +348,10 @@ export function renderCharts() {
     chartInstances.return = new Chart(returnCtx, {
         type: 'line',
         data: {
-            labels: [],
+            labels: displayLabels,
             datasets: [{
                 label: '组合收益',
-                data: [],
+                data: portfolioData,
                 borderColor: '#0052ff',
                 backgroundColor: portfolioGradient,
                 borderWidth: 3.5,
@@ -289,8 +366,8 @@ export function renderCharts() {
                 pointBorderColor: '#fff',
                 pointBorderWidth: 2,
             }, {
-                label: '沪深300',
-                data: [],
+                label: '上证指数',
+                data: benchmarkData,
                 borderColor: '#f4b000',
                 backgroundColor: benchmarkGradient,
                 borderWidth: 2.5,
@@ -351,12 +428,12 @@ export function renderCharts() {
         }
     });
 
-    // 2. 持仓配置环形图
+    // 2. 持仓配置环形图（显示所有持仓，使用实时价格）
     const allocCtx = document.getElementById('allocationChart').getContext('2d');
-    const topPositions = userPositions.slice(0, 6);
-    const allocColors = ['#0052ff', '#05b169', '#cf202f', '#f4b000', '#8b5cf6', '#ec4899'];
+    const sortedPositions = [...positionsWithRealtime].sort((a, b) => b.marketValue - a.marketValue);
+    const allocColors = ['#0052ff', '#05b169', '#cf202f', '#f4b000', '#8b5cf6', '#ec4899', '#00b42a', '#ff7d00', '#86909c', '#722ed1', '#06b6d4', '#d946ef', '#f97316', '#84cc16', '#6366f1'];
 
-    if (topPositions.length === 0) {
+    if (sortedPositions.length === 0) {
         chartInstances.alloc = new Chart(allocCtx, {
             type: 'doughnut',
             data: { labels: ['暂无数据'], datasets: [{ data: [1], backgroundColor: ['#eef0f3'], borderWidth: 0 }] },
@@ -366,10 +443,10 @@ export function renderCharts() {
         chartInstances.alloc = new Chart(allocCtx, {
             type: 'doughnut',
             data: {
-                labels: topPositions.map(p => p.name),
+                labels: sortedPositions.map(p => p.name),
                 datasets: [{
-                    data: topPositions.map(p => p.price * p.quantity),
-                    backgroundColor: allocColors,
+                    data: sortedPositions.map(p => p.marketValue),
+                    backgroundColor: allocColors.slice(0, sortedPositions.length),
                     borderWidth: 0,
                     hoverOffset: 6
                 }]
@@ -419,17 +496,17 @@ export function renderCharts() {
 
     // 3. 每日盈亏柱状图
     const dailyCtx = document.getElementById('dailyPnlChart').getContext('2d');
-    const dailyValues = []; // 暂无历史每日盈亏数据
+    const dailyValues = dailyPnlData.length > 0 ? dailyPnlData : [];
     const dailyBgColors = dailyValues.map(v => v >= 0 ? 'rgba(207, 32, 47, 0.8)' : 'rgba(5, 177, 105, 0.8)');
     const totalPnL = dailyValues.reduce((a, b) => a + b, 0);
 
-    document.getElementById('weeklyPnLTotal').textContent = `${totalPnL >= 0 ? '+' : ''}¥${formatCurrency(totalPnL)}`;
+    document.getElementById('weeklyPnLTotal').textContent = `${totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}万`;
     document.getElementById('weeklyPnLTotal').className = `font-mono font-semibold ${getPnLColor(totalPnL)}`;
 
     chartInstances.daily = new Chart(dailyCtx, {
         type: 'bar',
         data: {
-            labels: [],
+            labels: displayLabels,
             datasets: [{
                 label: '每日盈亏',
                 data: dailyValues,
@@ -447,20 +524,20 @@ export function renderCharts() {
                     backgroundColor: '#0a0b0d',
                     cornerRadius: 8,
                     callbacks: {
-                        label: ctx => ` 盈亏: ${ctx.raw >= 0 ? '+' : ''}¥${formatCurrency(ctx.raw)}`
+                        label: ctx => ` 盈亏: ${ctx.raw >= 0 ? '+' : ''}${ctx.raw.toFixed(2)}万`
                     }
                 }
             },
             scales: {
                 x: {
                     grid: { display: false },
-                    ticks: { font: { size: 11 } }
+                    ticks: { font: { size: 11 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 15 }
                 },
                 y: {
                     grid: { color: '#f0f0f0' },
                     ticks: {
                         font: { size: 11 },
-                        callback: v => '¥' + (v / 1000).toFixed(0) + 'k'
+                        callback: v => v.toFixed(2) + '万'
                     }
                 }
             }
@@ -537,8 +614,47 @@ export function renderVolumeChart() {
 }
 
 // --- 数据变更后刷新总览组件 ---
-export function refreshAll() {
-    renderStatsCards();
-    renderPositionsTable(currentFilter);
-    renderCharts();
+export function refreshAll(portfolio, pnlHistory) {
+    currentPortfolio = portfolio;
+    renderStatsCards(portfolio);
+    renderPositionsTable(currentFilter, portfolio);
+    renderCharts(pnlHistory, portfolio);
+}
+
+// --- 筛选（使用存储的portfolio）---
+export function filterPositions(filter) {
+    renderPositionsTable(filter, currentPortfolio);
+}
+
+// --- 排序（使用存储的portfolio）---
+export async function sortTable(field) {
+    sortDirection[field] = !sortDirection[field];
+    const prices = getPriceMap(getUserPositions());
+    let positions = [...getUserPositions()].map(p => ({
+        ...p,
+        price: prices[p.code],
+        pnl: (prices[p.code] - p.costPrice) * p.quantity,
+        pnlPct: p.costPrice > 0 ? ((prices[p.code] - p.costPrice) / p.costPrice) * 100 : 0,
+        marketValue: prices[p.code] * p.quantity
+    }));
+
+    positions.sort((a, b) => {
+        let valA, valB;
+        switch (field) {
+            case 'name': valA = a.name; valB = b.name; break;
+            case 'quantity': valA = a.quantity; valB = b.quantity; break;
+            case 'price': valA = a.price; valB = b.price; break;
+            case 'pnl': valA = a.pnl; valB = b.pnl; break;
+            default: return 0;
+        }
+        if (typeof valA === 'string') return sortDirection[field] ? valA.localeCompare(valB, 'zh') : valB.localeCompare(valA, 'zh');
+        return sortDirection[field] ? valA - valB : valB - valA;
+    });
+
+    try {
+        await saveUserPositions(positions.map(({ pnl, pnlPct, marketValue, ...rest }) => rest));
+    } catch {
+        // 排序持久化失败不阻断展示
+    }
+    renderPositionsTable(currentFilter, currentPortfolio);
 }

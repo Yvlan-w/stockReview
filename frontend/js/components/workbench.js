@@ -4,12 +4,14 @@
 import {
     clients, currentClientId, clientWarnOnly,
     setCurrentClient, setClientWarnOnly, getCurrentClient, clientStats, clientRiskAlerts,
-    getFilteredClients, getClientRelations, updateClientRemote, getUserPositions
+    getFilteredClients, getClientRelations, updateClientRemote, getUserPositions,
+    fetchClientPortfolio, fetchClientPnlHistory, portfolioData, pnlHistoryData
 } from '../services/clientService.js';
 import { fmtMoney } from '../core/formatters.js';
 import { RISK_BADGE } from '../core/config.js';
 import { showToast } from '../core/ui.js';
 import { marketDataState } from '../services/marketService.js';
+import { updatePriceCache, getPrice } from '../services/priceService.js';
 import { renderStatsCards, renderPositionsTable, renderCharts, renderSectorConcentration } from './overview.js';
 import { renderStrategySection } from './strategy.js';
 import { canEditClient, canHandleAlerts } from '../permissions/access.js';
@@ -107,23 +109,38 @@ export function toggleWarnOnly() {
     renderClientList();
 }
 
-export function selectClient(id) {
+export async function selectClient(id) {
     setCurrentClient(id);
-    refreshClientDetail();
+    await refreshClientDetail();
     renderClientList();
 }
 
 // --- 客户详情刷新（资料 + 风险 + 统计 + 持仓 + 图表） ---
-export function refreshClientDetail() {
+export async function refreshClientDetail() {
     renderClientProfile();
+    
+    // 并行加载实时数据
+    const c = getCurrentClient();
+    if (c) {
+        await Promise.all([
+            fetchClientPortfolio(c.id).catch(() => null),
+            fetchClientPnlHistory(c.id, 60).catch(() => null),
+        ]);
+        // 更新实时价格缓存（供弹窗/策略等组件降级使用）
+        updatePriceCache(portfolioData);
+    }
+    
     renderRiskAlerts();
-    renderStatsCards();
-    renderPositionsTable('all');
-    renderCharts();
+    renderStatsCards(portfolioData);
+    renderPositionsTable('all', portfolioData);
+    renderCharts(pnlHistoryData);
     renderSectorConcentration();
     renderStrategySection();
     const cnt = document.getElementById('positionCount');
-    if (cnt) cnt.textContent = getUserPositions().length;
+    if (cnt) {
+        const positions = portfolioData?.positions || getUserPositions();
+        cnt.textContent = positions.length;
+    }
 }
 
 // --- 客户资料卡 ---
@@ -353,12 +370,13 @@ export function exportClientReport() {
     const alerts = clientRiskAlerts(c);
     const pnlColor = s.totalPnl >= 0 ? '#cf202f' : '#05b169';
     const rows = (c.positions || []).map(p => {
-        const pnl = (p.price - p.costPrice) * p.quantity;
-        const pnlPct = (p.price - p.costPrice) / p.costPrice * 100;
+        const livePrice = getPrice(p.code, p.costPrice);
+        const pnl = (livePrice - p.costPrice) * p.quantity;
+        const pnlPct = (livePrice - p.costPrice) / p.costPrice * 100;
         const color = pnl >= 0 ? '#cf202f' : '#05b169';
         return `<tr>
             <td>${p.name}</td><td>${p.code}</td><td>${p.sector}</td>
-            <td>${p.quantity.toLocaleString()}</td><td>${p.costPrice.toFixed(2)}</td><td>${p.price.toFixed(2)}</td>
+            <td>${p.quantity.toLocaleString()}</td><td>${p.costPrice.toFixed(2)}</td><td>${livePrice.toFixed(2)}</td>
             <td style="color:${color}">${pnl >= 0 ? '+' : ''}${(pnl / 10000).toFixed(2)}万</td>
             <td style="color:${color}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</td>
         </tr>`;

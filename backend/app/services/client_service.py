@@ -90,7 +90,7 @@ def create_client(db: Session, data: ClientCreate, creator: User | None = None) 
     for p in data.positions:
         db.add(Position(
             client_id=client.id, name=p.name, code=p.code, sector=p.sector,
-            quantity=p.quantity, cost_price=p.cost_price, price=p.price,
+            quantity=p.quantity, cost_price=p.cost_price,
         ))
     db.commit()
     db.refresh(client)
@@ -170,7 +170,7 @@ def update_client_positions(db: Session, client: Client, positions) -> Client:
     for p in positions:
         client.positions.append(Position(
             name=p.name, code=p.code, sector=p.sector,
-            quantity=p.quantity, cost_price=p.cost_price, price=p.price,
+            quantity=p.quantity, cost_price=p.cost_price,
         ))
     db.commit()
     db.refresh(client)
@@ -232,7 +232,8 @@ def serialize_client(client: Client) -> dict:
         "positions": [
             {
                 "id": p.id, "name": p.name, "code": p.code, "sector": p.sector,
-                "quantity": p.quantity, "cost_price": p.cost_price, "price": p.price,
+                "quantity": p.quantity, "cost_price": p.cost_price,
+                # 现价不再持久化，由实时行情接口提供（前端通过 /api/market/realtime 获取）
             }
             for p in client.positions
         ],

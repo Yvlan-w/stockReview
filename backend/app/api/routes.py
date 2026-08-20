@@ -1,7 +1,8 @@
 """REST API 路由：认证 / 用户 / 客户 / 关系 / 风险预警 / 站内信。"""
 import csv
+import datetime as dt
 import io
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
@@ -10,7 +11,7 @@ from ..core.deps import get_current_user, require_roles
 from ..core.security import create_access_token
 from ..database import get_db
 from ..models import (
-    User, Client, RiskAlert, Notification,
+    User, Client, Position, RiskAlert, Notification, Transaction,
     ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR, ROLE_USER,
     ALERT_OPEN, ALERT_ACK, ALERT_RESOLVED,
 )
@@ -19,6 +20,7 @@ from ..schemas import (
     ClientCreate, ClientUpdate, RelationsUpdate, PositionsUpdate, ClientOut, ClientCreateOut,
     RiskAlertOut, AlertStatusUpdate, NotificationOut, UnreadCountOut,
     RelationImportRow, RelationExportRow, RelationImportResult,
+    TransactionCreate, TransactionOut,
 )
 from ..services import auth_service, client_service, risk_engine, notification_service
 from ..services import market_service
@@ -307,3 +309,258 @@ def get_market_analysis(db: Session = Depends(get_db)):
     """返回市场深度分析：高低切 / 领涨方向 / 核心驱动因素。"""
     result = market_analysis_service.get_market_analysis(db)
     return {"data": result}
+
+
+# ==================== 个股行情 ====================
+@router.get("/stocks/prices")
+def get_stock_prices_api(codes: str = "", db: Session = Depends(get_db)):
+    """批量查询个股实时行情（?codes=600519,000001）。
+
+    不传 codes 参数时自动查询所有活跃持仓股票。
+    """
+    from ..services.stock_price_service import get_stock_prices as _get, get_all_holding_codes
+    if codes.strip():
+        code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    else:
+        code_list = get_all_holding_codes(db)
+
+    prices = _get(db, code_list)
+    return {
+        "prices": {
+            code: data for code, data in prices.items() if data is not None
+        },
+        "updated_at": dt.datetime.utcnow().isoformat(),
+    }
+
+
+# ==================== 组合估值 / 盈亏 ====================
+@router.get("/clients/{client_id}/portfolio")
+def get_client_portfolio(
+    client_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """返回客户的实时组合估值（含实时价格、总盈亏、今日盈亏）。"""
+    client = client_service.get_visible_client(db, user, client_id)
+    from ..services.pnl_service import compute_portfolio
+    portfolio = compute_portfolio(db, client)
+    return portfolio
+
+
+@router.get("/clients/{client_id}/pnl-history")
+def get_client_pnl_history(
+    client_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    range: int = 30,
+):
+    """返回客户最近 N 天的盈亏历史（收益曲线数据）。"""
+    client = client_service.get_visible_client(db, user, client_id)
+    from ..services.pnl_service import get_pnl_history
+    return get_pnl_history(db, client.id, range_days=range)
+
+
+@router.post("/admin/snapshots/recalculate")
+def recalculate_snapshots_api(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """用历史K线收盘价重算盈亏快照（管理员，数据修复机制）。
+
+    Args:
+        client_id: 指定客户ID，为空则全部客户
+        start_date: 起始日期 YYYY-MM-DD（默认：最早交易记录日期）
+        end_date: 截止日期 YYYY-MM-DD（默认：今天）
+    """
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN)(user)
+    from ..services.pnl_service import recalculate_snapshots
+    return recalculate_snapshots(db, client_id=client_id,
+                                 start_date=start_date, end_date=end_date)
+
+
+@router.get("/admin/snapshots/validate")
+def validate_snapshots_api(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client_id: Optional[str] = None,
+):
+    """校验快照数据完整性（管理员）：缺失交易日 / 非交易日快照 / 连续同值 / NULL 值。"""
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN)(user)
+    from ..services.pnl_service import validate_snapshot_integrity
+    return validate_snapshot_integrity(db, client_id=client_id)
+
+
+@router.post("/stocks/refresh")
+async def trigger_stock_refresh(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """手动触发一次个股行情刷新（管理员）。"""
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN)(user)
+    from ..services.stock_price_service import refresh_stock_prices
+    ok = await refresh_stock_prices(db)
+    return {"status": "ok" if ok else "fail"}
+
+
+@router.post("/stocks/refresh-daily-kline")
+async def trigger_daily_kline_refresh(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    limit: int = 90,
+):
+    """手动触发日K线数据刷新，导入真实市场数据到 stock_daily_price 表（管理员）。
+
+    Args:
+        limit: 拉取的历史天数，默认90天
+    """
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN)(user)
+    from ..services.stock_price_service import refresh_all_daily_klines
+    result = await refresh_all_daily_klines(db, limit=limit)
+    return {"status": "ok", "data": result}
+
+
+# ==================== 系统配置（手续费等） ====================
+
+@router.get("/settings/trading-fees")
+def get_trading_fees(user: User = Depends(get_current_user)):
+    """获取当前手续费配置（所有登录用户可读）。"""
+    from .. import config
+    return {
+        "commission_rate": config.TRADING_FEE_COMMISSION,
+        "min_commission": config.TRADING_FEE_MIN_COMMISSION,
+        "stamp_tax_rate": config.TRADING_FEE_STAMP_TAX,
+        "transfer_fee_rate": config.TRADING_FEE_TRANSFER_FEE,
+        "description": {
+            "commission": "佣金费率（双边收取，最低5元）",
+            "stamp_tax": "印花税（仅卖出收取）",
+            "transfer_fee": "过户费（沪深两市双边收取）",
+        }
+    }
+
+
+@router.put("/settings/trading-fees")
+def update_trading_fees(
+    body: dict,
+    user: User = Depends(get_current_user),
+):
+    """更新手续费配置（管理员）。修改后立即生效（进程内）。"""
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN)(user)
+    from .. import config
+
+    if "commission_rate" in body:
+        config.TRADING_FEE_COMMISSION = float(body["commission_rate"])
+    if "min_commission" in body:
+        config.TRADING_FEE_MIN_COMMISSION = float(body["min_commission"])
+    if "stamp_tax_rate" in body:
+        config.TRADING_FEE_STAMP_TAX = float(body["stamp_tax_rate"])
+    if "transfer_fee_rate" in body:
+        config.TRADING_FEE_TRANSFER_FEE = float(body["transfer_fee_rate"])
+
+    return {
+        "status": "ok",
+        "commission_rate": config.TRADING_FEE_COMMISSION,
+        "min_commission": config.TRADING_FEE_MIN_COMMISSION,
+        "stamp_tax_rate": config.TRADING_FEE_STAMP_TAX,
+        "transfer_fee_rate": config.TRADING_FEE_TRANSFER_FEE,
+    }
+
+
+# ==================== 交易记录 ====================
+@router.post("/clients/{client_id}/transactions", response_model=TransactionOut, status_code=status.HTTP_201_CREATED)
+def create_transaction(
+    client_id: str,
+    body: TransactionCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """创建交易记录（买入/卖出）。卖出时会自动计算已实现盈亏（含手续费）。"""
+    client = client_service.get_visible_client(db, user, client_id)
+
+    # 确定交易日期
+    trade_date = body.trade_date or dt.date.today().isoformat()
+
+    # 手续费计算异常（范围非法等）统一转 422
+    try:
+        return _create_transaction_impl(db, client_id, body, trade_date)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+
+
+def _create_transaction_impl(db: Session, client_id: str, body, trade_date: str) -> Transaction:
+
+    # 计算已实现盈亏（仅卖出时，含手续费）
+    realized_pnl = 0.0
+    if body.action == "sell":
+        from ..services.pnl_service import calc_realized_pnl_with_fee
+        # 从现有持仓获取成本价（如果未提供 cost_price）
+        cost_price = body.cost_price
+        if cost_price is None:
+            position = db.query(Position).filter(
+                Position.client_id == client_id,
+                Position.code == body.code,
+            ).first()
+            if position:
+                cost_price = position.cost_price
+            else:
+                cost_price = 0.0
+
+        # 使用含手续费的计算
+        pnl_result = calc_realized_pnl_with_fee(
+            buy_price=cost_price,
+            sell_price=body.price,
+            quantity=body.quantity,
+            fee_mode=body.fee_mode,
+            fee_value=body.fee_value,
+        )
+        realized_pnl = pnl_result["net_pnl"]  # 净盈亏（扣除所有手续费）
+
+    # 买入：按指定模式（或全局默认配置）计算本笔手续费
+    fee_amount = 0.0
+    if body.action == "buy":
+        from ..services.pnl_service import calc_buy_fee
+        buy_fee = calc_buy_fee(body.price * body.quantity, body.fee_mode, body.fee_value)
+        fee_amount = buy_fee["total_fee"]
+    elif body.action == "sell":
+        fee_amount = pnl_result.get("fee_amount", 0.0)
+
+    tx = Transaction(
+        client_id=client_id,
+        code=body.code,
+        name=body.name,
+        action=body.action,
+        quantity=body.quantity,
+        price=body.price,
+        cost_price=body.cost_price,
+        fee_mode=body.fee_mode,
+        fee_value=body.fee_value,
+        fee_amount=fee_amount,
+        realized_pnl=realized_pnl,
+        trade_date=trade_date,
+    )
+    db.add(tx)
+    db.commit()
+    db.refresh(tx)
+    return tx
+
+
+@router.get("/clients/{client_id}/transactions", response_model=List[TransactionOut])
+def list_transactions(
+    client_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    limit: int = 100,
+):
+    """获取客户的交易记录列表。"""
+    client = client_service.get_visible_client(db, user, client_id)
+    transactions = db.query(Transaction).filter(
+        Transaction.client_id == client_id
+    ).order_by(Transaction.trade_date.desc(), Transaction.id.desc()).limit(limit).all()
+    return transactions

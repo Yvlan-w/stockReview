@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---- 认证 ----
 class LoginRequest(BaseModel):
@@ -42,17 +42,24 @@ class UserCreateOut(UserOut):
 
 # ---- 持仓 ----
 class PositionIn(BaseModel):
+    """持仓录入/更新。现价不再持久化（通过实时行情获取），price 字段仅为向后兼容保留、将被忽略。"""
     name: str
     code: str
     sector: str
     quantity: int = Field(..., gt=0)
     cost_price: float = Field(..., gt=0)
-    price: float = Field(..., gt=0)
+    price: Optional[float] = Field(None, gt=0, deprecated=True)  # 已废弃：现价由实时行情提供
 
 
-class PositionOut(PositionIn):
+class PositionOut(BaseModel):
+    """持仓输出：不含 price（现价由 /api/clients/{id}/portfolio 实时提供）。"""
     model_config = ConfigDict(from_attributes=True)
     id: int
+    name: str
+    code: str
+    sector: str
+    quantity: int
+    cost_price: float
 
 
 # ---- 客户 ----
@@ -171,3 +178,109 @@ class RelationImportResult(BaseModel):
     created: int = 0
     updated: int = 0
     errors: List[RelationImportError] = []
+
+
+# ---- 个股行情 ----
+class StockPriceOut(BaseModel):
+    code: str
+    name: Optional[str] = None
+    current_price: Optional[float] = None
+    prev_close: Optional[float] = None
+    change_pct: Optional[float] = None
+    change_amount: Optional[float] = None
+    volume: Optional[float] = None
+    turnover: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    open_price: Optional[float] = None
+    updated_at: Optional[datetime] = None
+
+
+class StockPriceBatchOut(BaseModel):
+    prices: dict[str, Optional[StockPriceOut]] = {}
+    updated_at: Optional[datetime] = None
+
+
+# ---- 组合估值 / 盈亏 ----
+class PositionDetail(BaseModel):
+    code: str
+    name: str
+    quantity: int
+    costPrice: float
+    currentPrice: float
+    prevClose: Optional[float] = None
+    marketValue: float
+    pnl: float
+    pnlPct: float
+    todayPnl: float
+
+
+class PortfolioOut(BaseModel):
+    totalMarketValue: float
+    totalCost: float
+    totalPnl: float
+    totalPnlPct: float
+    todayPnl: float
+    todayPnlPct: float
+    totalAssets: float
+    availableCash: float
+    positions: List[PositionDetail] = []
+
+
+class PnLHistoryOut(BaseModel):
+    dates: List[str] = []
+    pnl: List[Optional[float]] = []
+    dailyPnl: List[Optional[float]] = []
+    benchmark: List[Optional[float]] = []
+    benchmarkReturn: List[Optional[float]] = []
+
+
+# ---- 交易记录 ----
+class TransactionCreate(BaseModel):
+    """创建交易记录。
+
+    手续费（可选，不传时按全局配置计算）：
+    - fee_mode='rate'：fee_value 为费率（0 < fee_value <= 0.01，即最高1%），手续费 = 金额 × 费率
+    - fee_mode='fixed'：fee_value 为固定金额（0 < fee_value <= 100000 元/笔）
+    """
+    code: str = Field(..., min_length=1, max_length=16)
+    name: Optional[str] = None
+    action: str = Field(..., pattern="^(buy|sell)$")
+    quantity: int = Field(..., gt=0)
+    price: float = Field(..., gt=0)
+    cost_price: Optional[float] = None  # 交易时的成本价（卖出时用于计算已实现盈亏）
+    fee_mode: Optional[str] = Field(None, pattern="^(rate|fixed)$")  # 手续费模式
+    fee_value: Optional[float] = None  # 费率值（rate）或固定金额（fixed）
+    trade_date: Optional[str] = None  # 交易日期，默认今天
+
+    @model_validator(mode="after")
+    def _validate_fee(self):
+        """手续费组合校验：模式与数值成对出现，且符合各自范围。"""
+        if self.fee_mode is None and self.fee_value is not None:
+            raise ValueError("指定 fee_value 时必须同时指定 fee_mode（rate/fixed）")
+        if self.fee_mode is not None:
+            if self.fee_value is None:
+                raise ValueError(f"指定 fee_mode={self.fee_mode} 时必须同时提供 fee_value")
+            if self.fee_mode == "rate" and not (0 < self.fee_value <= 0.01):
+                raise ValueError("费率需在 (0, 0.01] 之间（如 0.00025 表示万2.5，最高 1%）")
+            if self.fee_mode == "fixed" and not (0 < self.fee_value <= 100000):
+                raise ValueError("固定手续费金额需在 (0, 100000] 元之间")
+        return self
+
+
+class TransactionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    client_id: str
+    code: str
+    name: Optional[str] = None
+    action: str
+    quantity: int
+    price: float
+    cost_price: Optional[float] = None
+    fee_mode: Optional[str] = None
+    fee_value: Optional[float] = None
+    fee_amount: float
+    realized_pnl: float
+    trade_date: str
+    created_at: datetime

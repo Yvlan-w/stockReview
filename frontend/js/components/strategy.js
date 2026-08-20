@@ -3,6 +3,7 @@
 // ============================================================
 import { getCurrentClient } from '../services/clientService.js';
 import { formatCurrency, formatNumber, getBadgeClass, getTypeLabel, getResultBadge } from '../core/formatters.js';
+import { getPrice } from '../services/priceService.js';
 
 const STRATEGIES = ['均线突破策略', '趋势跟随策略', '价值回归策略', '事件驱动策略', '动量轮动策略'];
 const NOTES = {
@@ -35,8 +36,9 @@ function buildClientStrategy(client) {
 
     const rand = seededRandom(hashCode(client.id || 'default'));
     const trades = positions.map((p, i) => {
-        const pnl = (p.price - p.costPrice) * p.quantity;
-        const pnlPct = (p.price - p.costPrice) / p.costPrice * 100;
+        const livePrice = getPrice(p.code, p.costPrice);
+        const pnl = (livePrice - p.costPrice) * p.quantity;
+        const pnlPct = (livePrice - p.costPrice) / p.costPrice * 100;
         const isBuy = i % 2 === 0;
         const result = pnlPct > 3 ? 'success' : (pnlPct < -3 ? 'failed' : 'partial');
 
@@ -56,7 +58,7 @@ function buildClientStrategy(client) {
             type: isBuy ? 'buy' : 'sell',
             stock: p.name,
             code: p.code,
-            price: isBuy ? p.costPrice : p.price,
+            price: isBuy ? p.costPrice : livePrice,
             quantity: p.quantity,
             result,
             note,
@@ -65,9 +67,9 @@ function buildClientStrategy(client) {
 
     const successCount = trades.filter(t => t.result === 'success').length;
     const winRate = trades.length ? successCount / trades.length * 100 : 0;
-    const profits = positions.map(p => (p.price - p.costPrice) * p.quantity);
+    const profits = positions.map(p => (getPrice(p.code, p.costPrice) - p.costPrice) * p.quantity);
     const avgProfit = profits.length ? profits.reduce((a, b) => a + b, 0) / profits.length : 0;
-    const maxDrawdown = Math.min(0, ...positions.map(p => (p.price - p.costPrice) / p.costPrice * 100));
+    const maxDrawdown = Math.min(0, ...positions.map(p => (getPrice(p.code, p.costPrice) - p.costPrice) / p.costPrice * 100));
 
     return {
         stats: {

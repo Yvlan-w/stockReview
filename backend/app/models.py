@@ -115,6 +115,11 @@ class ServiceAssignment(Base):
 
 
 class Position(Base):
+    """持仓记录。
+
+    注意：不存储现价（price）字段。现价一律通过实时行情获取：
+    实时行情表(stock_price) → 日K线最近收盘(stock_daily_price) → 成本价兜底。
+    """
     __tablename__ = "positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -124,7 +129,6 @@ class Position(Base):
     sector = Column(String(16), nullable=False)
     quantity = Column(Integer, nullable=False, default=0)
     cost_price = Column(Float, nullable=False, default=0.0)
-    price = Column(Float, nullable=False, default=0.0)
 
     client = relationship("Client", back_populates="positions")
 
@@ -217,3 +221,96 @@ class MarketSector(Base):
     down_count = Column(Integer, nullable=True)
     raw = Column(JSON, nullable=True)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# 个股行情与盈亏数据
+# ---------------------------------------------------------------------------
+
+class StockPrice(Base):
+    """个股实时行情（覆盖式更新，每只股票一行）。"""
+    __tablename__ = "stock_price"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(16), unique=True, nullable=False, index=True)
+    name = Column(String(64), nullable=True)
+    current_price = Column(Float, nullable=True)
+    prev_close = Column(Float, nullable=True)
+    change_pct = Column(Float, nullable=True)
+    change_amount = Column(Float, nullable=True)
+    volume = Column(Float, nullable=True)
+    turnover = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    open_price = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class StockDailyPrice(Base):
+    """个股日 K 线（历史数据，用于计算昨日收盘价、收益曲线基准）。"""
+    __tablename__ = "stock_daily_price"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(16), nullable=False, index=True)
+    trade_date = Column(String(10), nullable=False, index=True)
+    open = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    volume = Column(Float, nullable=True)
+    turnover = Column(Float, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("code", "trade_date", name="uq_stock_date"),
+    )
+
+
+class PnLDailySnapshot(Base):
+    """每日盈亏快照（客户级别的每日总资产/盈亏记录，用于绘制收益曲线）。"""
+    __tablename__ = "pnl_daily_snapshot"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String(64), ForeignKey("clients.id"), nullable=False, index=True)
+    snapshot_date = Column(String(10), nullable=False, index=True)
+    total_market_value = Column(Float, nullable=False, default=0.0)
+    total_cost = Column(Float, nullable=False, default=0.0)
+    available_cash = Column(Float, nullable=False, default=0.0)
+    total_assets = Column(Float, nullable=False, default=0.0)
+    daily_pnl = Column(Float, nullable=False, default=0.0)
+    realized_pnl = Column(Float, nullable=False, default=0.0)
+    floating_pnl = Column(Float, nullable=False, default=0.0)
+    cumulative_pnl = Column(Float, nullable=False, default=0.0)
+    cumulative_return_pct = Column(Float, nullable=True)
+    benchmark_value = Column(Float, nullable=True)
+    benchmark_return_pct = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "snapshot_date", name="uq_client_snapshot_date"),
+    )
+
+
+class Transaction(Base):
+    """交易记录（每笔买入/卖出交易的流水记录，含本笔手续费）。
+
+    手续费支持两种模式（fee_mode）：
+    - 'rate'  按费率：手续费 = 交易金额 × fee_value（如 0.00025 = 万2.5）
+    - 'fixed' 固定金额：手续费 = fee_value（元/笔）
+    - None    未指定时按全局配置（config.TRADING_FEE_*）计算
+    """
+    __tablename__ = "transactions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String(64), ForeignKey("clients.id"), nullable=False, index=True)
+    code = Column(String(16), nullable=False, index=True)
+    name = Column(String(64), nullable=True)
+    action = Column(String(8), nullable=False)  # 'buy' / 'sell'
+    quantity = Column(Integer, nullable=False)
+    price = Column(Float, nullable=False)
+    cost_price = Column(Float, nullable=True)  # 交易时的成本价
+    fee_mode = Column(String(8), nullable=True)     # 'rate' / 'fixed' / None(全局默认)
+    fee_value = Column(Float, nullable=True)        # 费率值或固定金额
+    fee_amount = Column(Float, nullable=False, default=0.0)  # 本笔实际手续费（元）
+    realized_pnl = Column(Float, nullable=False, default=0.0)  # 已实现盈亏（卖出时，已扣手续费）
+    trade_date = Column(String(10), nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
