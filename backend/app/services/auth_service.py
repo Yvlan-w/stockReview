@@ -1,4 +1,6 @@
 """认证与用户管理服务。"""
+import os
+
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -80,45 +82,17 @@ def create_user(db: Session, data: UserCreate) -> tuple[User, str | None]:
     return user, initial_password
 
 
-# 默认演示账号密码（私有单机环境演示用）
-DEFAULT_PASSWORD = "123456"
-
-_ADVISORS = [
-    ("adv_001", "顾问·张伟"),
-    ("adv_002", "顾问·李娜"),
-    ("adv_003", "顾问·王强"),
-    ("adv_004", "顾问·刘敏"),
-    ("adv_005", "顾问·陈静"),
-]
-_SERVICES = [
-    ("svc_001", "客服·赵芳"),
-    ("svc_002", "客服·钱磊"),
-    ("svc_003", "客服·孙婷"),
-    ("svc_004", "客服·周明"),
-    ("svc_005", "客服·吴娜"),
-    ("svc_006", "客服·郑浩"),
-]
-
-
-def _ensure_user(db: Session, uid: str, username: str, name: str, role: str, sub_role: str | None = None) -> User:
-    user = db.get(User, uid)
-    if user is None:
-        user = User(
-            id=uid, username=username, name=name, role=role, sub_role=sub_role,
-            password_hash=hash_password(DEFAULT_PASSWORD),
-        )
-        db.add(user)
-    return user
+# 管理员初始密码（仅首次建号时使用；可用环境变量 STOCK_REVIEW_ADMIN_PASSWORD 覆盖）
+ADMIN_PASSWORD_DEFAULT = os.getenv("STOCK_REVIEW_ADMIN_PASSWORD", "jdzt123456")
 
 
 def seed_default_users(db: Session) -> None:
-    """幂等写入默认用户（管理员/顾问/客服/演示用户）。"""
-    _ensure_user(db, "u_admin", "admin", "管理员", ROLE_ADMIN)
-    _ensure_user(db, "u_guest", "guest", "游客", ROLE_GUEST)
-    _ensure_user(db, "u_client_demo", "client001", "客户·演示", ROLE_USER, SUBROLE_CLIENT)
-    _ensure_user(db, "u_user_demo", "user001", "普通用户·演示", ROLE_USER, SUBROLE_NON_CLIENT)
-    for uid, name in _ADVISORS:
-        _ensure_user(db, uid, uid, name, ROLE_ADVISOR)
-    for uid, name in _SERVICES:
-        _ensure_user(db, uid, uid, name, ROLE_SERVICE)
-    db.commit()
+    """生产种子：仅幂等创建唯一管理员账号，其余用户表初始为空。"""
+    user = db.get(User, "u_admin")
+    if user is None:
+        user = User(
+            id="u_admin", username="admin", name="管理员", role=ROLE_ADMIN,
+            password_hash=hash_password(ADMIN_PASSWORD_DEFAULT),
+        )
+        db.add(user)
+        db.commit()

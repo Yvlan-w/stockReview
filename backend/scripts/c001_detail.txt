@@ -1,0 +1,44 @@
+============================================================================
+C001 明细核查
+============================================================================
+
+## positions 中 C001 全部持仓
+  id=26 code=600036 name='????' sector='??' qty=2000 cost=40.0
+  id=25 code=600519 name='????' sector='??' qty=200 cost=1491.0
+
+## transactions 中 C001 全部流水
+  id=1 date=2026-08-19 sell code=600519 name='贵州茅台' qty=100 price=1800.0 cost_price=1700.0 fee=0.0 realized_pnl=10000.0
+  id=2 date=2026-08-19 buy  code=000001 name='平安银行' qty=500 price=12.5 cost_price=12.5 fee=0.0 realized_pnl=0.0
+  id=3 date=2026-08-19 sell code=600519 name='贵州茅台' qty=100 price=1800.0 cost_price=1700.0 fee=0.0 realized_pnl=10000.0
+  id=4 date=2026-08-19 buy  code=000001 name='平安银行' qty=500 price=12.5 cost_price=12.5 fee=0.0 realized_pnl=0.0
+  id=5 date=2026-08-20 buy  code=600519 name='贵州茅台' qty=10 price=1680.0 cost_price=1680.0 fee=0.0 realized_pnl=0.0
+
+## 000001 在所有表中的状态
+### stock_price（实时行情）
+### stock_daily_price（日K线，最新5条）
+### positions（持仓）
+  （无记录）
+### transactions（流水）
+  client=C001 2026-08-19 buy qty=500 price=12.5 cost_price=12.5 realized=0.0
+  client=C001 2026-08-19 buy qty=500 price=12.5 cost_price=12.5 realized=0.0
+
+## C001 全部客户的 600519 持仓与流水对照
+### positions
+  C003 qty=50 cost=1680.0 name='贵州茅台'
+  C004 qty=50 cost=1680.0 name='贵州茅台'
+  C001 qty=200 cost=1491.0 name='????'
+### transactions
+  C001 2026-08-19 sell qty=100 price=1800.0 realized=10000.0 fee=0.0
+  C001 2026-08-19 sell qty=100 price=1800.0 realized=10000.0 fee=0.0
+  C001 2026-08-20 buy qty=10 price=1680.0 realized=0.0 fee=0.0
+
+## C001 最近5天快照
+  2026-08-20: mv=336020.00 cost=378200.00 cash=180000.00 assets=516020.00 daily=-3856.00 float=-3856.00 cum=-22180.00
+  2026-08-19: mv=339876.00 cost=378200.00 cash=180000.00 assets=519876.00 daily=23698.00 float=-38324.00 cum=-18324.00
+  2026-08-18: mv=336178.00 cost=378200.00 cash=180000.00 assets=516178.00 daily=1160.00 float=-42022.00 cum=-42022.00
+  2026-08-17: mv=335018.00 cost=378200.00 cash=180000.00 assets=515018.00 daily=-10300.00 float=-43182.00 cum=-43182.00
+  2026-08-14: mv=345318.00 cost=378200.00 cash=180000.00 assets=525318.00 daily=-3280.00 float=-32882.00 cum=-32882.00
+
+## 名称乱码检查：positions 中 C001 的名称十六进制
+  600519: '????' hex=3f3f3f3f
+  600036: '????' hex=3f3f3f3f

@@ -11,7 +11,6 @@ export let marketDataState = {
     realtime: null,           // parsed realtime data
     kline: null,              // parsed SH kline data
     sectors: null,            // parsed sector data (top 80 industries sorted by turnover desc, from East Money)
-    analysis: null,           // market analysis: rotation + drivers
     lastUpdated: null,        // 后端快照 updated_at 时间
     fetchStatus: 'pending',   // 'ok' | 'fail' | 'pending'
     fetchError: null,
@@ -102,17 +101,6 @@ export async function fetchSectors(limit = 80) {
     const body = await _fetchMarket(`/sectors?limit=${limit}`);
     if (!body.data || body.data.length === 0) {
         throw new Error('板块数据尚未就绪');
-    }
-    return body.data;
-}
-
-/**
- * 拉取市场深度分析（高低切 / 领涨方向 / 核心驱动因素）。
- */
-export async function fetchMarketAnalysis() {
-    const body = await _fetchMarket('/analysis');
-    if (!body.data) {
-        throw new Error('市场分析数据尚未就绪');
     }
     return body.data;
 }

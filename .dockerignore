@@ -1,0 +1,19 @@
+# 构建上下文排除项（保持镜像精净，数据库文件绝不打入镜像）
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/*.db
+**/*.db-wal
+**/*.db-shm
+.git
+.gitignore
+deploy
+docs
+*.md
+持仓复盘_分享版_*.html
+backend/scripts
+backend/_*.py
+backend/_*.txt
+backend/import_klines.py
+backend/refresh_prices.py
+backend/=

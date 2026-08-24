@@ -1,0 +1,33 @@
+# ============================================================
+# 持仓复盘 · 服务器部署编排（测试与正式环境通用，改 env 即可迁移）
+# 启动：docker compose --env-file .env up -d
+# 升级：docker compose --env-file .env pull && docker compose --env-file .env up -d
+# ============================================================
+services:
+  web:
+    # 镜像地址由 .env 注入（本地测试可用本地 tag 覆盖）
+    image: ${IMAGE:-stock-review:local}
+    container_name: stock-review
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      # JWT 密钥：生产必须强随机值（.env 生成，勿用代码默认值）
+      STOCK_REVIEW_SECRET: ${STOCK_REVIEW_SECRET:?请在 .env 中设置 STOCK_REVIEW_SECRET}
+      # Token 有效期（小时数换算成分钟；默认 720 = 12 小时）
+      STOCK_REVIEW_TOKEN_TTL: ${STOCK_REVIEW_TOKEN_TTL:-720}
+      TZ: Asia/Shanghai
+    volumes:
+      # SQLite 数据卷：容器重建/升级不丢数据，迁移正式服务器只需拷贝此目录
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,7 +1,7 @@
 // ============================================================
 // 应用入口：组装所有 ES 模块 + 暴露内联事件处理函数
 // ============================================================
-import { setCurrentDate } from './core/ui.js';
+import { setCurrentDate, initAdBanner, closeAdBanner } from './core/ui.js';
 import { loadClients, setCurrentClient, getFilteredClients } from './services/clientService.js';
 import { isWorkbenchVisible } from './permissions/access.js';
 import {
@@ -14,10 +14,9 @@ import {
 } from './components/overview.js';
 import {
     renderMarketOverview, refreshMarket, renderSectorHeatmap,
-    renderLeadershipAnalysis, renderDriverAnalysis, initVolumeChartTabs,
+    initVolumeChartTabs,
 } from './components/market.js';
-import { renderNewsSection } from './components/news.js';
-import { fetchLiveNews } from './services/newsService.js';
+import { fetchLiveNews, showMoreNews } from './services/newsService.js';
 import {
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, deletePosition,
@@ -43,10 +42,11 @@ import {
 // ---- 暴露给内联 onclick 使用（ES module 作用域隔离）----
 Object.assign(window, {
     renderClientList, toggleWarnOnly, selectClient, addClientTag, removeClientTag,
+    closeAdBanner,
     exportClientReport, updateClientNote, evaluateClientRisk, handleAlertStatus,
     filterPositions, sortTable,
     refreshMarket,
-    fetchLiveNews,
+    fetchLiveNews, showMoreNews,
     openIdentityModal, closeIdentityModal, exportShareSnapshot,
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, deletePosition,
@@ -93,6 +93,7 @@ function setupNavScrollSpy() {
 
 document.addEventListener('DOMContentLoaded', async () => {
     setCurrentDate();
+    initAdBanner();
     setupNavScrollSpy();
     initAuth();
 
@@ -110,9 +111,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderVolumeChart();          // 上证成交量图（先渲染模拟数据占位）
     initVolumeChartTabs();        // 初始化成交量图切换按钮
     renderSectorHeatmap();
-    renderLeadershipAnalysis();
-    renderDriverAnalysis();
-    renderNewsSection();
     fetchLiveNews();              // 加载实时资讯
 
     // 首屏渲染后再拉取东方财富实时数据
@@ -144,5 +142,7 @@ document.addEventListener('keydown', (e) => {
         closePositionModal();
         closeAdjustModal();
         closeIdentityModal();
+        // 标签编辑弹窗（点其关闭按钮触发统一清理逻辑）
+        document.querySelector('#tagEditorModal [data-close]')?.click();
     }
 });

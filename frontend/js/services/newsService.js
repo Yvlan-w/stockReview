@@ -9,6 +9,11 @@ export let liveNewsLoaded = false;
 // 最近一次成功加载的资讯，用于刷新失败时保留上次结果
 let lastNewsItems = [];
 
+// 当前可见条数（默认仅展示前 3 条，"显示更多"每次追加）
+let newsVisibleCount = 3;
+const NEWS_INITIAL_COUNT = 3;
+const NEWS_PAGE_SIZE = 5;
+
 // 各数据源当前可用状态（供界面展示）
 export let newsSourceStatus = { ok: [], fail: [] };
 
@@ -160,13 +165,20 @@ export async function fetchLiveNews() {
         return;
     }
 
-    lastNewsItems = uniqueNews.slice(0, 10);
+    lastNewsItems = uniqueNews.slice(0, 20);
+    newsVisibleCount = NEWS_INITIAL_COUNT;   // 每次拉取后重置为仅展示前 3 条
     newsSourceStatus = { ok, fail };
     renderLiveNews(lastNewsItems, { ok, fail });
     liveNewsLoaded = true;
 }
 
-// 渲染实时资讯（含动态来源状态提示）
+// "显示更多"：每次追加 5 条（全部显示后按钮自动隐藏）
+export function showMoreNews() {
+    newsVisibleCount = Math.min(newsVisibleCount + NEWS_PAGE_SIZE, lastNewsItems.length);
+    renderLiveNews(lastNewsItems, newsSourceStatus);
+}
+
+// 渲染实时资讯（默认前 3 条 + 显示更多；两列卡片网格，含动态来源状态提示）
 export function renderLiveNews(newsItems, { ok, fail } = {}) {
     const newsContainer = document.getElementById('newsList');
     if (!newsContainer) return;
@@ -181,6 +193,19 @@ export function renderLiveNews(newsItems, { ok, fail } = {}) {
         : `<span class="w-2 h-2 bg-positive rounded-full animate-pulse-soft"></span>
            <span>实时资讯 · 数据来源：${sourceText}</span>`;
 
+    const visibleItems = newsItems.slice(0, newsVisibleCount);
+    const remaining = newsItems.length - visibleItems.length;
+
+    // 显示更多按钮：全部展示后不再渲染
+    const moreBtnHtml = remaining > 0
+        ? `<div class="flex justify-center pt-1">
+               <button onclick="showMoreNews()" class="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl border border-hairline bg-white text-sm font-medium text-body hover:text-primary hover:border-primary/40 transition-colors">
+                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                   显示更多（还有 ${remaining} 条）
+               </button>
+           </div>`
+        : '';
+
     newsContainer.innerHTML = `
         <div class="flex items-center justify-between mb-3 px-1">
             <div class="flex items-center gap-2 text-sm text-muted flex-wrap">
@@ -191,22 +216,25 @@ export function renderLiveNews(newsItems, { ok, fail } = {}) {
                 刷新
             </button>
         </div>
-        ${newsItems.map(item => `
-            <article class="news-card bg-white rounded-2xl border border-hairline p-5 cursor-pointer" onclick="window.open('${item.link}', '_blank')">
-                <div class="flex items-start justify-between gap-4 mb-3">
-                    <div class="flex items-center gap-2 flex-wrap">
-                        <span class="px-2 py-0.5 text-xs font-medium rounded-md bg-primary/10 text-primary">${item.source}</span>
-                        <span class="text-xs text-muted">${item.time}</span>
-                        <svg class="w-3 h-3 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            ${visibleItems.map(item => `
+                <article class="news-card bg-white rounded-2xl border border-hairline p-5 cursor-pointer flex flex-col" onclick="window.open('${item.link}', '_blank')">
+                    <div class="flex items-start justify-between gap-4 mb-3">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="px-2 py-0.5 text-xs font-medium rounded-md bg-primary/10 text-primary">${item.source}</span>
+                            <span class="text-xs text-muted">${item.time}</span>
+                            <svg class="w-3 h-3 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                        </div>
                     </div>
-                </div>
-                <h3 class="font-semibold text-ink text-sm leading-relaxed mb-2 line-clamp-2 hover:text-primary transition-colors">${item.title}</h3>
-                ${item.summary ? `<p class="text-sm text-muted leading-relaxed line-clamp-2 mb-3">${item.summary}</p>` : ''}
-                <div class="flex items-center gap-2 flex-wrap">
-                    ${item.tags.map(tag => `<span class="px-2 py-0.5 text-xs rounded-md bg-surface-strong text-muted">#${tag}</span>`).join('')}
-                </div>
-            </article>
-        `).join('')}
+                    <h3 class="font-semibold text-ink text-sm leading-relaxed mb-2 line-clamp-2 hover:text-primary transition-colors">${item.title}</h3>
+                    ${item.summary ? `<p class="text-sm text-muted leading-relaxed line-clamp-2 mb-3">${item.summary}</p>` : ''}
+                    <div class="flex items-center gap-2 flex-wrap mt-auto">
+                        ${item.tags.map(tag => `<span class="px-2 py-0.5 text-xs rounded-md bg-surface-strong text-muted">#${tag}</span>`).join('')}
+                    </div>
+                </article>
+            `).join('')}
+        </div>
+        ${moreBtnHtml}
     `;
 }
 

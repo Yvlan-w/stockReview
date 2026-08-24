@@ -91,7 +91,12 @@ async def _sector_refresh_loop():
 
 
 async def _stock_price_refresh_loop():
-    """个股行情：交易期每 20s 刷一次，非交易期每 120s。刷新后写入当日盈亏快照。"""
+    """个股行情：交易期每 20s 刷一次，非交易期每 120s。刷新后写入当日盈亏快照。
+
+    每日（收盘后首次刷新时）自动执行一次快照完整性校验：
+    缺失交易日 / 非交易日快照 / 连续同值脏数据 → 记录告警日志，
+    可通过 POST /api/admin/snapshots/recalculate 修复。
+    """
     await asyncio.sleep(6)
     try:
         from .services.stock_price_service import refresh_stock_prices
@@ -99,6 +104,7 @@ async def _stock_price_refresh_loop():
     except Exception as e:
         logger.warning("启动时个股行情初始刷新失败: %s", e)
 
+    last_check_date = None
     while True:
         try:
             interval = (STOCK_REFRESH_INTERVAL
@@ -108,7 +114,9 @@ async def _stock_price_refresh_loop():
 
             # 刷新个股行情
             from .services.stock_price_service import refresh_stock_prices
-            from .services.pnl_service import write_all_daily_snapshots
+            from .services.pnl_service import (
+                write_all_daily_snapshots, validate_snapshot_integrity,
+            )
             db = SessionLocal()
             try:
                 try:
@@ -118,6 +126,39 @@ async def _stock_price_refresh_loop():
                     logger.warning("个股行情刷新失败（快照仍按降级价格写入）: %s", e)
                 # 写入当日盈亏快照（无论行情刷新是否成功，均有价格降级链兜底）
                 write_all_daily_snapshots(db)
+
+                # 每日一次完整性校验（新交易日首次刷新时触发）
+                today = _local_date_str()
+                if today != last_check_date:
+                    last_check_date = today
+                    try:
+                        result = validate_snapshot_integrity(db)
+                        if not result["ok"]:
+                            logger.warning(
+                                "[每日快照完整性校验] %s；"
+                                "可调用 POST /api/admin/snapshots/recalculate 修复",
+                                result["summary"])
+                    except Exception as e:
+                        logger.warning("快照完整性校验异常（继续）: %s", e)
+                    # 数据一致性对账（持仓/流水/现金跨表核对）：
+                    # FATAL 不一致向管理员发送站内信告警
+                    try:
+                        from .services.consistency_service import (
+                            check_consistency, report_consistency_alert,
+                        )
+                        consistency = check_consistency(db)
+                        if consistency["fatals"]:
+                            n = report_consistency_alert(db, consistency["fatals"])
+                            logger.warning(
+                                "[每日数据一致性对账] 发现 %d 项 FATAL，"
+                                "已向管理员发送 %d 条告警站内信",
+                                len(consistency["fatals"]), n)
+                        else:
+                            logger.info(
+                                "[每日数据一致性对账] 通过（warn=%d）",
+                                len(consistency["warnings"]))
+                    except Exception as e:
+                        logger.warning("数据一致性对账异常（继续）: %s", e)
             finally:
                 db.close()
 
@@ -127,9 +168,37 @@ async def _stock_price_refresh_loop():
             logger.warning("个股行情刷新异常（继续）: %s", e)
 
 
+def _local_date_str() -> str:
+    """当前本地日期（Asia/Shanghai 语境下的服务器本地时区）。"""
+    import datetime as dt
+    return dt.date.today().isoformat()
+
+
+def _migrate_sqlite_columns():
+    """SQLite 轻量迁移：为已有表补充新增列（create_all 不会改已存在的表）。
+
+    当前：risk_alerts.dimension（风险预警维度，用于按维度保留最新一条）。
+    """
+    from sqlalchemy import text
+
+    migrations = [
+        ("risk_alerts", "dimension", "VARCHAR(64)"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_type in migrations:
+            cols = [row[1] for row in conn.execute(
+                text(f"PRAGMA table_info({table})"))]
+            if cols and column not in cols:
+                conn.execute(text(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                conn.commit()
+                logger.info("已迁移：%s 表新增 %s 列", table, column)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    _migrate_sqlite_columns()
     db = SessionLocal()
     try:
         seed_all(db)
@@ -163,6 +232,13 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(ws_router)
+
+
+@app.get("/api/health")
+async def health():
+    """容器健康检查（compose healthcheck / 负载均衡探针）。"""
+    return {"status": "ok"}
+
 
 # 同源托管前端静态资源（置于最后，确保 /api、/ws 优先匹配）
 if os.path.isdir(FRONTEND_DIR):
