@@ -252,6 +252,8 @@ def compute_portfolio(db: Session, client: Client) -> dict:
         return {
             "totalMarketValue": 0.0,
             "totalCost": 0.0,
+            "totalFloatingPnl": 0.0,
+            "floatingPnlPct": 0.0,
             "totalPnl": round(total_realized_pnl, 2),
             "totalPnlPct": 0.0,
             "todayPnl": 0.0,
@@ -359,9 +361,12 @@ def compute_portfolio(db: Session, client: Client) -> dict:
     today_pnl = today_floating_pnl + today_realized_pnl
     today_pnl_pct = (today_pnl / (total_assets - today_pnl) * 100) if (total_assets - today_pnl) > 0 else 0.0
 
+    floating_pnl_pct = (total_floating_pnl / total_cost * 100) if total_cost > 0 else 0.0
     return {
         "totalMarketValue": round(total_market_value, 2),
         "totalCost": round(total_cost, 2),
+        "totalFloatingPnl": round(total_floating_pnl, 2),
+        "floatingPnlPct": round(floating_pnl_pct, 2),
         "totalPnl": round(total_pnl, 2),
         "totalPnlPct": round(total_pnl_pct, 2),
         "todayPnl": round(today_pnl, 2),

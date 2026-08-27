@@ -104,3 +104,14 @@ export async function fetchSectors(limit = 80) {
     }
     return body.data;
 }
+
+/**
+ * 拉取市场深度分析（高低切 / 领涨方向 / 核心驱动因素）。
+ */
+export async function fetchMarketAnalysis() {
+    const body = await _fetchMarket('/analysis');
+    if (!body.data) {
+        throw new Error('市场分析数据尚未就绪');
+    }
+    return body.data;
+}

@@ -2,7 +2,7 @@
 <html lang="zh-CN"><head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AGR 的持仓复盘 · 分享版</title>
+    <title>AGR 的持仓复盘</title>
 
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -64,12 +64,6 @@
     <link rel="stylesheet" href="css/components/timeline.css">
     <link rel="stylesheet" href="css/components/modal.css">
 
-    <!-- 分享快照数据标记（导出时被真实数据替换） -->
-    <script>
-        window.EMBEDDED_POSITIONS = null;
-        window.EMBEDDED_PROFILE = null;
-        window.EMBEDDED_USERDATA = null;
-    </script>
 </head>
 
 <body class="min-h-screen" style="overflow-x: hidden;">
@@ -672,17 +666,51 @@
                     <button onclick="handleLogout()" class="mt-3 w-full px-4 py-3 text-sm font-medium text-negative bg-negative/5 border border-negative/20 hover:bg-negative/10 rounded-xl transition-colors">退出登录</button>
                 </div>
 
-                <div class="px-8 pb-4">
-                    <div class="rounded-xl bg-primary/5 border border-primary/15 p-4">
-                        <p class="text-xs text-body leading-relaxed mb-3">
-                            生成一份<strong class="text-primary">分享版 HTML</strong>：把当前<strong class="text-primary">持仓、账户名、可用资金</strong>直接烘焙进文件。领导/同事双击打开即可看到你的真实数据，无需你陪同讲解。
-                        </p>
-                        <button id="exportShareBtn" onclick="exportShareSnapshot()" class="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-xl transition-colors shadow-sm shadow-primary/25">生成分享版</button>
+                <div class="px-8 pb-8">
+                    <button onclick="closeIdentityModal()" class="w-full px-4 py-3 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== Tag Editor Modal ==================== -->
+    <div id="tagEditorModal" class="fixed inset-0 z-[100] hidden">
+        <div class="absolute inset-0 modal-backdrop" onclick="closeTagEditorModal()"></div>
+        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg mx-4">
+            <div class="bg-canvas rounded-3xl modal-panel overflow-hidden animate-fade-in-up">
+                <div class="px-7 pt-7 pb-5 flex items-start justify-between gap-3">
+                    <div>
+                        <h3 class="text-lg font-semibold text-ink">编辑客户标签</h3>
+                        <p class="text-xs text-muted mt-1">选择受控分类标签，或添加自定义自由标签</p>
+                    </div>
+                    <button onclick="closeTagEditorModal()" data-close class="w-8 h-8 rounded-full bg-surface-strong flex items-center justify-center text-muted hover:text-ink hover:bg-hairline transition-all">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+
+                <!-- 受控标签选择器（4 组，单选/多选）-->
+                <div id="clientTagSelector" class="px-7 pb-5 space-y-4"></div>
+
+                <!-- 自由标签管理 -->
+                <div class="px-7 pb-4">
+                    <div class="text-xs font-medium text-muted mb-1.5">自由标签（自定义，如 VIP / 待跟进）</div>
+                    <div class="flex flex-wrap gap-2 mb-2" id="freeTagsList">
+                        <!-- 已有自由标签动态渲染，每枚带 × 删除 -->
+                    </div>
+                    <div class="flex gap-2">
+                        <input type="text" id="freeTagInput" placeholder="输入新自由标签（回车或点添加）"
+                            class="flex-1 px-3 py-2 bg-surface-strong border border-hairline rounded-xl text-sm text-ink placeholder:text-muted-soft focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10">
+                        <button onclick="addFreeTag()" type="button" class="px-3 py-2 text-sm font-medium rounded-xl bg-primary/10 text-primary hover:bg-primary/20 transition-colors">添加</button>
                     </div>
                 </div>
 
-                <div class="px-8 pb-8">
-                    <button onclick="closeIdentityModal()" class="w-full px-4 py-3 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors">关闭</button>
+                <div class="px-7 pb-7 flex gap-3">
+                    <button onclick="closeTagEditorModal()" class="flex-1 px-4 py-2.5 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors">
+                        取消
+                    </button>
+                    <button onclick="submitTagEditor()" class="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-xl transition-colors shadow-sm shadow-primary/25">
+                        保存标签
+                    </button>
                 </div>
             </div>
         </div>
@@ -696,8 +724,6 @@
         </div>
     </div>
 
-    <!--SNAPSHOT_BAR_SLOT-->
-
-    <script type="module" src="js/main.js"></script>
+    <script type="module" src="js/main.js?v=20260826_0300"></script>
 </body>
 </html>

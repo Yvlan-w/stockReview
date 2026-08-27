@@ -2,14 +2,14 @@
 // 认证 UI 集成：登录表单、导航栏角色/未读展示、站内信中心、WebSocket。
 // 说明：后端 Phase 2 提供 /api/auth、/api/notifications 与 /ws/{token}。
 // ============================================================
-import { showToast } from '../core/ui.js';
+import { showToast, showAdBanner } from '../core/ui.js';
 import {
     isLoggedIn, getToken, getUser, login, logout, roleLabel,
     fetchNotifications, fetchUnreadCount, markNotificationRead,
     markAllNotificationsRead, connectSocket,
 } from '../services/authService.js';
 import { getFilteredClients, setCurrentClient, loadClients } from '../services/clientService.js';
-import { renderClientList, refreshClientDetail } from './workbench.js';
+import { renderClientList, refreshClientDetail, refreshClientSummaries } from './workbench.js';
 import { isWorkbenchVisible, canEdit, canAccessAdminPanel, canAccessOnboarding } from '../permissions/access.js';
 
 let socket = null;
@@ -53,6 +53,8 @@ function applyAccessControl() {
 function renderWorkspaceData() {
     if (!isWorkbenchVisible()) return;
     renderClientList();
+    // 异步拉取客户盈亏摘要（后台加载，结果就绪后自动刷新列表盈亏显示）
+    refreshClientSummaries().catch(() => {});
     const first = getFilteredClients()[0];
     setCurrentClient(first ? first.id : null);
     refreshClientDetail();
@@ -104,6 +106,7 @@ export async function handleLogin(event) {
     try {
         await login(username, password);
         showToast('登录成功', 'success');
+        showAdBanner();   // 每次登录成功后重新展示广告 Banner
         renderNavState();
         renderAuthModal();
         applyAccessControl();

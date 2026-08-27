@@ -15,6 +15,21 @@ JWT_SECRET = os.getenv("STOCK_REVIEW_SECRET", "dev-secret-change-me-in-productio
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("STOCK_REVIEW_TOKEN_TTL", "720"))  # 默认 12 小时
 
+# 种子数据执行模式（三态：never / first / always）
+#   never  = 永不执行 seed（生产稳定后锁定）
+#   first  = 仅当 users 表 AND clients 表都为空时才执行（生产默认，只建 1 个 admin）
+#   always = 总是执行 seed（幂等：admin 已存在则跳过 insert）
+_RUN_SEED_RAW = (os.getenv("STOCK_REVIEW_RUN_SEED") or "first").lower()
+if _RUN_SEED_RAW in ("0", "off", "false", "no", "never"):
+    RUN_SEED = "never"
+elif _RUN_SEED_RAW in ("1", "on", "true", "yes", "always"):
+    RUN_SEED = "always"
+else:
+    RUN_SEED = "first"
+
+# admin 初始密码（仅首次建号时使用；可用环境变量覆盖）
+ADMIN_PASSWORD_DEFAULT = os.getenv("STOCK_REVIEW_ADMIN_PASSWORD", "jdzt123456")
+
 # 前端静态资源目录（FastAPI 同源托管，避免跨域与 WebSocket 握手问题）
 FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
 

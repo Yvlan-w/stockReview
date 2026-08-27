@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
 
 from .api.routes import router
 from .api.ws import ws_router
@@ -176,19 +177,29 @@ def _local_date_str() -> str:
 
 def _migrate_sqlite_columns():
     """SQLite 轻量迁移：为已有表补充新增列（create_all 不会改已存在的表）。
-
-    当前：risk_alerts.dimension（风险预警维度，用于按维度保留最新一条）。
+    SQLite 不支持 DROP COLUMN / ALTER COLUMN，仅支持 ADD COLUMN。
     """
     from sqlalchemy import text
 
     migrations = [
+        # 表名, 列名, 列类型（同 models.py 定义）
         ("risk_alerts", "dimension", "VARCHAR(64)"),
+        # 调仓/成本批次：transactions 表新增 5 列（v0.1.2+ 策略复盘所需）
+        ("transactions", "market", "VARCHAR(8)"),
+        ("transactions", "executed_at", "DATETIME"),
+        ("transactions", "fee_commission", "FLOAT NOT NULL DEFAULT 0.0"),
+        ("transactions", "fee_stamp_tax", "FLOAT NOT NULL DEFAULT 0.0"),
+        ("transactions", "fee_transfer_fee", "FLOAT NOT NULL DEFAULT 0.0"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
+            # 检查表是否存在（SQLite：PRAGMA table_info 对不存在表返回空行集）
             cols = [row[1] for row in conn.execute(
                 text(f"PRAGMA table_info({table})"))]
-            if cols and column not in cols:
+            if not cols:
+                logger.info("跳过迁移：表 %s 不存在（将由 create_all 创建）", table)
+                continue
+            if column not in cols:
                 conn.execute(text(
                     f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
                 conn.commit()
@@ -197,8 +208,17 @@ def _migrate_sqlite_columns():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from .config import RUN_SEED, DATABASE_URL
+    from .migrations.changelog import diff_against_expected
+
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite_columns()
+
+    # 结构变更审计：打印 changelog 期望 vs 实际差异（供部署日志人工巡检）
+    for line in diff_against_expected(engine):
+        logger.warning("结构变更差异：%s", line)
+    logger.info("RUN_SEED=%s · DB=%s", RUN_SEED, DATABASE_URL.replace(":///", ":///***"))
+
     db = SessionLocal()
     try:
         seed_all(db)
@@ -241,5 +261,16 @@ async def health():
 
 
 # 同源托管前端静态资源（置于最后，确保 /api、/ws 优先匹配）
+# 自定义：本地开发时禁用 JS/CSS 缓存，避免浏览器缓存导致 ES Module 导入报错
+class _NoCacheStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        resp: FileResponse = super().file_response(*args, **kwargs)
+        path = str(args[0]) if args else ""
+        if path.endswith(".js") or path.endswith(".css") or path.endswith(".html") or path.endswith(".mjs"):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+        return resp
+
 if os.path.isdir(FRONTEND_DIR):
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    app.mount("/", _NoCacheStaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

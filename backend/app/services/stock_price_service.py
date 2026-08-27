@@ -619,6 +619,244 @@ def get_prev_close(db: Session, code: str) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# 股票搜索（添加持仓自动填充：代码 / 名称 / 拼音 → 现价 + 行业）
+# ---------------------------------------------------------------------------
+
+# 东财搜索建议接口（公开 token，支持代码/名称/拼音前缀模糊搜索）
+SUGGEST_HOST = "https://searchapi.eastmoney.com/api/suggest/get"
+SUGGEST_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"
+
+# 东财行业名 → 前端板块枚举（SECTORS）映射
+# 覆盖东财 f100 常见一级行业；匹配失败兜底返回"其他"（前端板块必填）
+INDUSTRY_SECTOR_MAP: dict[str, list[str]] = {
+    "消费": [
+        "酿酒", "食品", "饮料", "白酒", "乳品", "调味", "农牧", "农业", "养殖", "种植", "饲料",
+        "家电", "商业", "零售", "百货", "超市", "旅游", "酒店", "餐饮", "服装", "纺织", "贸易",
+        "商贸", "化妆", "休闲", "珠宝", "文具", "玩具", "物流", "包装", "印刷", "出版", "燃气灶具",
+    ],
+    "金融": ["证券", "银行", "保险", "多元金融", "信托", "期货", "创投", "金融"],
+    "科技": [
+        "软件", "互联网", "计算机", "通信", "电子信息", "消费电子", "光学", "游戏",
+        "传媒", "文化", "教育", "安防", "仪表", "智能", "数据", "云计算", "无人机",
+    ],
+    "医疗": ["医疗", "医药", "生物", "中药", "疫苗", "器械", "医美", "制药", "临床"],
+    "新能源": ["电池", "新能源", "汽车", "能源金属", "电机", "充电", "锂电", "整车", "零部件"],
+    "光伏": ["光伏", "风电", "电网", "电源设备", "输配", "储能"],
+    "资源": [
+        "有色", "煤炭", "钢铁", "石油", "黄金", "采掘", "贵金属", "小金属", "能源",
+        "油气", "矿山", "稀土", "盐湖", "非金属矿",
+    ],
+    "军工": ["航天", "军工", "国防", "船舶", "兵器", "航空装备"],
+    "半导体": ["半导体", "电子化学品", "元件", "芯片", "集成电路", "封测", "光刻"],
+    "地产": ["房地产", "地产", "建材", "装修", "工程建设", "水泥", "园林", "物业", "租售"],
+    "化工": ["化工", "化学", "化纤", "塑料", "橡胶", "化肥", "纤维", "树脂", "纯碱", "氟"],
+}
+
+# 搜索结果内存缓存（keyword → (results, timestamp)），短 TTL 防止连续输入重复请求
+_search_cache: dict[str, tuple[list[dict], float]] = {}
+_SEARCH_CACHE_TTL = 60  # 秒
+
+
+def industry_to_sector(industry: Optional[str]) -> str:
+    """东财行业名（如"酿酒行业"）→ 前端板块枚举（如"消费"）。
+
+    匹配失败兜底返回"其他"，保证自动填充时板块字段总有值。
+    """
+    if industry:
+        for sector, keywords in INDUSTRY_SECTOR_MAP.items():
+            if any(kw in industry for kw in keywords):
+                return sector
+    return "其他"
+
+
+def _extract_code(raw_code: str) -> str:
+    """从 suggest 返回的 Code（如 SH600519 / SZ000001）提取纯数字代码。"""
+    import re
+    m = re.search(r"(\d{5,8})$", (raw_code or "").strip())
+    return m.group(1) if m else ""
+
+
+def _parse_suggest(raw: dict) -> list[dict]:
+    """解析东财 suggest 响应：{"QuotationCodeTable": {"Data": [{"Code", "Name"}, ...]}}。"""
+    items = (raw.get("QuotationCodeTable") or {}).get("Data") or []
+    result = []
+    for it in items:
+        code = _extract_code(it.get("Code") or "")
+        name = (it.get("Name") or "").strip()
+        if code and name:
+            result.append({"code": code, "name": name})
+    return result
+
+
+async def _fetch_suggest(keyword: str, count: int = 8) -> list[dict]:
+    """东财搜索建议：返回 [{code, name}] 候选列表，失败返回 []。"""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(MARKET_HTTP_TIMEOUT, connect=10),
+            follow_redirects=True,
+        ) as client:
+            resp = await client.get(SUGGEST_HOST, params={
+                "input": keyword,
+                "type": "14",  # 沪深A股
+                "token": SUGGEST_TOKEN,
+                "count": count,
+            }, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://so.eastmoney.com/",
+            })
+            resp.raise_for_status()
+            raw = resp.json()
+
+        return _parse_suggest(raw)
+    except Exception as e:
+        logger.warning("股票搜索 suggest 失败 (%s): %s", keyword, e)
+        return []
+
+
+async def _fetch_search_quotes(secids: list[str]) -> dict[str, dict]:
+    """批量获取候选股现价与所属行业（ulist 接口，双 host 轮询）。
+
+    返回 {code: {"price": float, "change_pct": float, "industry": str|None}}。
+    """
+    if not secids:
+        return {}
+
+    fields = "f2,f3,f12,f14,f100"  # 现价/涨跌幅/代码/名称/所属行业
+    for host in STOCK_HOSTS:
+        try:
+            url = (
+                f"{host}?fltt=2&invt=2&ut={EASTMONEY_UT}"
+                f"&fields={fields}&secids={','.join(secids)}"
+            )
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(MARKET_HTTP_TIMEOUT, connect=10),
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(url, headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Referer": "https://quote.eastmoney.com/",
+                })
+                resp.raise_for_status()
+                raw = resp.json()
+
+            if raw.get("rc") != 0:
+                raise ValueError(f"rc={raw.get('rc')}")
+
+            result: dict[str, dict] = {}
+            for item in (raw.get("data") or {}).get("diff") or []:
+                code = str(item.get("f12", "") or "").strip()
+                if not code:
+                    continue
+                try:
+                    price = float(item.get("f2", 0) or 0)
+                except (ValueError, TypeError):
+                    price = 0.0
+                try:
+                    change_pct = float(item.get("f3", 0) or 0)
+                except (ValueError, TypeError):
+                    change_pct = 0.0
+                industry = item.get("f100")
+                if not isinstance(industry, str) or not industry.strip():
+                    industry = None
+                result[code] = {
+                    "price": price,
+                    "change_pct": change_pct,
+                    "industry": industry,
+                }
+            if result:
+                return result
+        except Exception as e:
+            logger.warning("搜索行情获取失败 (%s): %s", host, e)
+
+    return {}
+
+
+def _search_local(db: Session, keyword: str, limit: int) -> list[dict]:
+    """本地 stock_price 表搜索（降级数据源，仅覆盖已入库股票）。"""
+    from sqlalchemy import or_
+    try:
+        rows = db.execute(
+            select(StockPrice)
+            .where(or_(
+                StockPrice.code.like(f"{keyword}%"),
+                StockPrice.name.like(f"%{keyword}%"),
+            ))
+            .order_by(StockPrice.code)
+            .limit(limit)
+        ).scalars().all()
+    except Exception as e:
+        logger.warning("本地股票搜索失败: %s", e)
+        return []
+
+    return [
+        {
+            "code": r.code,
+            "name": r.name or r.code,
+            "price": r.current_price,
+            "change_pct": r.change_pct,
+            "industry": None,
+            "sector": "其他",  # 本地表无行业信息，兜底"其他"
+        }
+        for r in rows
+    ]
+
+
+async def search_stocks(db: Session, keyword: str, limit: int = 8) -> list[dict]:
+    """按代码 / 名称 / 拼音搜索股票，用于添加持仓时自动填充。
+
+    数据链路：东财 suggest（候选）→ ulist（现价 + 行业）→ 行业映射前端板块枚举；
+    线上失败时降级本地 stock_price 表模糊匹配。
+
+    Returns:
+        [{code, name, price, change_pct, industry, sector}]，price/行业可能为 None
+    """
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return []
+    limit = max(1, min(int(limit), 10))
+
+    # 命中缓存直接返回
+    cached = _search_cache.get(keyword)
+    if cached and time.time() - cached[1] < _SEARCH_CACHE_TTL:
+        return cached[0][:limit]
+
+    results: list[dict] = []
+
+    # 1) 线上搜索：suggest 候选 + 批量行情（含行业）
+    candidates = await _fetch_suggest(keyword, count=limit)
+    if candidates:
+        secids = [code_to_secid(c["code"]) for c in candidates]
+        quotes = await _fetch_search_quotes(secids)
+        for c in candidates:
+            q = quotes.get(c["code"]) or {}
+            results.append({
+                "code": c["code"],
+                "name": c["name"],
+                "price": q.get("price") or None,
+                "change_pct": q.get("change_pct"),
+                "industry": q.get("industry"),
+                "sector": industry_to_sector(q.get("industry")),
+            })
+
+    # 2) 降级：本地 stock_price 表模糊匹配
+    if not results:
+        results = _search_local(db, keyword, limit)
+
+    # 写入缓存
+    _search_cache[keyword] = (results, time.time())
+    if len(_search_cache) > 200:  # 防止无限增长
+        _search_cache.pop(next(iter(_search_cache)))
+
+    return results[:limit]
+
+
+# ---------------------------------------------------------------------------
 # 批量日 K 线刷新（导入真实市场数据）
 # ---------------------------------------------------------------------------
 

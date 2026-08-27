@@ -9,6 +9,11 @@ from ..models import (
 )
 from ..schemas import ClientCreate, ClientUpdate, RelationsUpdate, RelationImportRow, UserCreate
 from . import auth_service
+from . import audit_service as _audit
+
+
+FIELDS_BASIC = ("name", "age", "risk_level", "tags", "note", "available_cash")
+FIELDS_RELATIONS = ("advisor_id", "service_ids")
 
 
 def _get_role_user(db: Session, user_id: str, role: str) -> User:
@@ -97,24 +102,36 @@ def create_client(db: Session, data: ClientCreate, creator: User | None = None) 
     return client, login
 
 
-def update_client_fields(db: Session, client: Client, data: ClientUpdate) -> Client:
-    for field in ("name", "age", "risk_level", "tags", "note", "available_cash"):
-        val = getattr(data, field)
+def update_client_fields(db: Session, client: Client, data: ClientUpdate, *, actor: User | None = None) -> Client:
+    before = _audit._snapshot_client_basic(client)
+    for field in FIELDS_BASIC:
+        val = getattr(data, field, None)
         if val is not None:
             setattr(client, field, val)
     db.commit()
     db.refresh(client)
+    after = _audit._snapshot_client_basic(client)
+    _audit.log_client_change(
+        db, actor=actor, action="client.update", client=client,
+        before=before, after=after, fields=FIELDS_BASIC,
+    )
     return client
 
 
-def update_client_relations(db: Session, client: Client, data: RelationsUpdate) -> Client:
+def update_client_relations(db: Session, client: Client, data: RelationsUpdate, *, actor: User | None = None) -> Client:
     advisor, service_ids = validate_relations(db, data.advisor_id, data.service_ids)
+    before = _audit._snapshot_client_relations(client)
     client.advisor_id = advisor.id
     client.service_assignments.clear()
     for sid in service_ids:
         db.add(ServiceAssignment(client_id=client.id, service_id=sid))
     db.commit()
     db.refresh(client)
+    after = _audit._snapshot_client_relations(client)
+    _audit.log_client_change(
+        db, actor=actor, action="client.relations", client=client,
+        before=before, after=after, fields=FIELDS_RELATIONS,
+    )
     return client
 
 
@@ -218,6 +235,10 @@ def get_visible_client(db: Session, user: User, client_id: str) -> Client:
 
 
 def serialize_client(client: Client) -> dict:
+    service_names = [
+        sa.service.name for sa in client.service_assignments
+        if sa.service is not None
+    ]
     return {
         "id": client.id,
         "name": client.name,
@@ -229,11 +250,11 @@ def serialize_client(client: Client) -> dict:
         "advisor_id": client.advisor_id,
         "advisor_name": client.advisor.name if client.advisor else None,
         "service_ids": client.service_ids,
+        "service_names": service_names,
         "positions": [
             {
                 "id": p.id, "name": p.name, "code": p.code, "sector": p.sector,
                 "quantity": p.quantity, "cost_price": p.cost_price,
-                # 现价不再持久化，由实时行情接口提供（前端通过 /api/market/realtime 获取）
             }
             for p in client.positions
         ],

@@ -1,25 +1,23 @@
 // ============================================================
-// 身份管理占位 + 分享快照导出
-// 说明：原「个人设置（头像/昵称）」已移除；保留「生成分享版」功能。
-//       身份管理将作为后续角色/权限系统（管理员/顾问/客服/用户）的入口。
+// 身份管理弹窗：修改个人密码
 // ============================================================
 import { showToast } from '../core/ui.js';
-import { getUserPositions, getUserData } from '../services/clientService.js';
+import {
+    changePassword, passwordStrengthScore,
+} from '../services/authService.js';
 import { renderAuthModal } from './auth.js';
 
-// 分享版快照中的账户名（身份管理接入后替换为当前登录用户姓名）
-const SHARE_NICKNAME = 'AGR';
-
-// --- 打开身份管理弹窗（Phase 2 接入角色/权限） ---
+// ---- 打开身份管理弹窗 ----
 export function openIdentityModal() {
     const modal = document.getElementById('identityModal');
     if (!modal) return;
     renderAuthModal();
+    renderPasswordChanger();
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
 }
 
-// --- 关闭身份管理弹窗 ---
+// ---- 关闭身份管理弹窗 ----
 export function closeIdentityModal() {
     const modal = document.getElementById('identityModal');
     if (!modal) return;
@@ -27,75 +25,156 @@ export function closeIdentityModal() {
     document.body.style.overflow = '';
 }
 
-// --- 获取当前页面源码（fetch 优先，DOM 序列化兜底） ---
-export async function getSourceHtml() {
-    try {
-        const res = await fetch(window.location.href, { cache: 'no-store' });
-        if (res.ok) {
-            const text = await res.text();
-            if (text && text.indexOf('EMBEDDED_POSITIONS') !== -1) return text;
-        }
-    } catch (e) { /* file:// 下 fetch 会失败，走下方兜底 */ }
-    return '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+// ---- 修改密码区块：注入到 authUserPanel 退出登录按钮上方 ----
+function renderPasswordChanger() {
+    const panel = document.getElementById('authUserPanel');
+    if (!panel) return;
+    // 已注入则跳过
+    if (document.getElementById('pwdChangerSection')) return;
+
+    const section = document.createElement('div');
+    section.id = 'pwdChangerSection';
+    section.className = 'mt-4 rounded-xl bg-surface-soft border border-hairline p-4';
+    section.innerHTML = `
+        <div class="flex items-center justify-between mb-3">
+            <div class="text-sm font-semibold text-ink">修改密码</div>
+            <button id="pwdToggler" class="text-xs text-primary hover:text-primary-active transition-colors">展开</button>
+        </div>
+        <form id="pwdChangeForm" class="hidden space-y-3 pt-1">
+            <div>
+                <label class="block text-xs font-medium text-body mb-1">原密码</label>
+                <input id="pwdOld" type="password" autocomplete="current-password" class="w-full px-3 py-2 bg-canvas border border-hairline rounded-xl text-sm text-ink focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10" placeholder="请输入原密码">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-body mb-1">新密码</label>
+                <input id="pwdNew" type="password" autocomplete="new-password" class="w-full px-3 py-2 bg-canvas border border-hairline rounded-xl text-sm text-ink focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10" placeholder="至少 6 位，建议字母+数字">
+                <div class="mt-2 h-1.5 w-full rounded-full bg-hairline overflow-hidden">
+                    <div id="pwdStrengthBar" class="h-full w-0 bg-negative transition-all duration-200"></div>
+                </div>
+                <div class="mt-1 flex justify-between text-[10px]">
+                    <span id="pwdStrengthLabel" class="text-muted">强度：极弱</span>
+                    <span class="text-muted">建议 8 位以上 + 大小写字母/数字/特殊字符</span>
+                </div>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-body mb-1">确认新密码</label>
+                <input id="pwdConfirm" type="password" autocomplete="new-password" class="w-full px-3 py-2 bg-canvas border border-hairline rounded-xl text-sm text-ink focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10" placeholder="再次输入新密码">
+            </div>
+            <div class="flex gap-2 pt-1">
+                <button type="submit" id="pwdSubmitBtn" class="flex-1 px-3 py-2 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-xl transition-colors">确认修改</button>
+                <button type="button" id="pwdCancelBtn" class="px-3 py-2 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors">取消</button>
+            </div>
+        </form>
+    `;
+    // 插入到「退出登录」按钮前面
+    const logoutBtn = panel.querySelector('button[onclick="handleLogout()"]');
+    if (logoutBtn) {
+        panel.insertBefore(section, logoutBtn);
+    } else {
+        panel.appendChild(section);
+    }
+
+    const toggler = section.querySelector('#pwdToggler');
+    const form = section.querySelector('#pwdChangeForm');
+    const cancelBtn = section.querySelector('#pwdCancelBtn');
+    toggler?.addEventListener('click', () => {
+        const isHidden = form.classList.contains('hidden');
+        form.classList.toggle('hidden');
+        toggler.textContent = isHidden ? '收起' : '展开';
+    });
+    cancelBtn?.addEventListener('click', () => {
+        form.classList.add('hidden');
+        toggler.textContent = '展开';
+        form.reset();
+        updateStrengthBar();
+    });
+
+    // 强度实时更新
+    const newInput = section.querySelector('#pwdNew');
+    newInput?.addEventListener('input', updateStrengthBar);
+
+    form?.addEventListener('submit', onPwdSubmit);
 }
 
-// --- 生成分享版快照 HTML（当前真实数据烘焙进标记） ---
-export async function exportShareSnapshot() {
-    const btn = document.getElementById('exportShareBtn');
-    if (!btn) return;
-    const originalHtml = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/><path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" class="opacity-75"/></svg> 生成中...';
+function updateStrengthBar() {
+    const input = document.getElementById('pwdNew');
+    const bar = document.getElementById('pwdStrengthBar');
+    const label = document.getElementById('pwdStrengthLabel');
+    if (!bar || !label) return;
+    const pwd = input?.value || '';
+    const { score, label: sLabel } = passwordStrengthScore(pwd);
+    const widths = ['0%', '25%', '50%', '75%', '100%'];
+    const colors = ['bg-negative', 'bg-negative', 'bg-warning', 'bg-positive', 'bg-primary'];
+    bar.className = `h-full transition-all duration-200 ${colors[score]}`;
+    bar.style.width = widths[score];
+    label.textContent = '强度：' + sLabel;
+}
 
-    try {
-        const positions = getUserPositions();
-        const userData = getUserData();
-        const profile = {
-            nickname: SHARE_NICKNAME,
-            avatarDataUrl: null
-        };
-
-        let html = await getSourceHtml();
-        if (!html || html.indexOf('EMBEDDED_POSITIONS') === -1) {
-            throw new Error('无法读取页面源码，请通过 http 访问本页后重试');
-        }
-
-        html = html
-            .replace('window.EMBEDDED_POSITIO' + 'NS = null;', 'window.EMBEDDED_POSITIONS = ' + JSON.stringify(positions) + ';')
-            .replace('window.EMBEDDED_PROFI' + 'LE = null;', 'window.EMBEDDED_PROFILE = ' + JSON.stringify(profile) + ';')
-            .replace('window.EMBEDDED_USERDA' + 'TA = null;', 'window.EMBEDDED_USERDATA = ' + JSON.stringify(userData) + ';');
-
-        if (html.indexOf('window.EMBEDDED_POSITIO' + 'NS = null;') !== -1) {
-            throw new Error('数据注入失败，源码标记未匹配');
-        }
-
-        const dateStr = new Date().toLocaleDateString('zh-CN');
-        const safeName = String(profile.nickname).replace(/[&<>"']/g, '');
-        html = html.replace(/<title>[^<]*<\/title>/, '<title>' + (safeName || 'AGR') + ' 的持仓复盘 · 分享版</title>');
-
-        const snapshotBar = ''
-            + '<div style="position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:9999;background:rgba(10,12,16,0.82);color:#fff;font-size:11px;padding:5px 14px;border-radius:8px 8px 0 0;font-family:system-ui,-apple-system,sans-serif;backdrop-filter:blur(4px);white-space:nowrap;">'
-            + '📌 持仓复盘分享快照 · 导出于 ' + dateStr + ' · 持仓/账户为导出时刻真实数据，大盘与资讯为实时接口'
-            + '</div>';
-        html = html.replace('<!--SNAPSHOT_BAR_SL' + 'OT-->', snapshotBar);
-
-        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        const stamp = new Date().toISOString().slice(0, 10);
-        a.href = url;
-        a.download = '持仓复盘_分享版_' + stamp + '.html';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(url), 1500);
-
-        showToast('✅ 分享版已生成，可直接发给领导', 'success');
-    } catch (e) {
-        console.error('Export failed:', e);
-        showToast('❌ 生成失败：' + (e.message || '未知错误'), 'error');
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = originalHtml;
+// ---- 修改密码提交 ----
+export async function handleChangePassword(event) {
+    // 兼容 addEventListener 绑定和全局 onclick 两种绑定方式
+    if (event) {
+        event.preventDefault?.();
+        event.stopPropagation?.();
     }
+    const form = document.getElementById('pwdChangeForm');
+    if (!form) return null;
+    const oldEl = document.getElementById('pwdOld');
+    const newEl = document.getElementById('pwdNew');
+    const confirmEl = document.getElementById('pwdConfirm');
+    const btn = document.getElementById('pwdSubmitBtn');
+    const oldPwd = oldEl?.value || '';
+    const newPwd = newEl?.value || '';
+    const confirmPwd = confirmEl?.value || '';
+
+    if (!oldPwd) { showToast('请输入原密码', 'warning'); return null; }
+    if (!newPwd) { showToast('请输入新密码', 'warning'); return null; }
+    if (newPwd.length < 6) { showToast('新密码长度至少 6 位', 'warning'); return null; }
+    if (newPwd !== confirmPwd) { showToast('两次输入的新密码不一致', 'error'); return null; }
+    if (newPwd === oldPwd) { showToast('新密码不能与原密码相同', 'warning'); return null; }
+
+    const originalText = btn?.innerHTML;
+    try {
+        if (btn) { btn.disabled = true; btn.innerHTML = '修改中...'; }
+        const res = await changePassword(oldPwd, newPwd);
+        form.reset();
+        updateStrengthBar();
+        const msg = `✅ 密码修改成功（强度：${res?.strength_label ?? '未知'}）`;
+        showToast(msg, 'success');
+        const toggler = document.getElementById('pwdToggler');
+        if (toggler) { toggler.click(); }
+        return res;
+    } catch (e) {
+        showToast('❌ 修改失败：' + (e?.message || '请检查原密码是否正确'), 'error');
+        return null;
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = originalText || '确认修改'; }
+    }
+}
+
+// 全局挂载：表单 submit 绑定到这个函数，避免重复初始化
+if (typeof window !== 'undefined' && !window.__pwdChangeBound) {
+    window.__pwdChangeBound = true;
+    // 把 submit 事件绑定到 DOMContentLoaded 后
+    const bind = () => {
+        const panel = document.getElementById('authUserPanel');
+        if (!panel) return;
+        // 使用事件委托：submit 时捕获处理
+        panel.addEventListener('submit', e => {
+            if (e.target && e.target.id === 'pwdChangeForm') {
+                onPwdSubmit(e);
+            }
+        });
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bind);
+    } else {
+        bind();
+    }
+}
+
+function onPwdSubmit(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    return handleChangePassword(event);
 }

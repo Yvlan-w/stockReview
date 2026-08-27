@@ -5,7 +5,7 @@ import { getUserPositions, saveUserPositions, getUserData, getCurrentClient } fr
 import { formatCurrency, formatNumber, getPnLColor, getSectorBadgeClass, getSectorBarColor } from '../core/formatters.js';
 import { marketDataState } from '../services/marketService.js';
 import { canEditClient } from '../permissions/access.js';
-import { getPrice, getPriceMap } from '../services/priceService.js';
+import { getPrice, getPriceMap, updatePriceCache } from '../services/priceService.js';
 
 let currentFilter = 'all';
 let sortDirection = {};
@@ -619,6 +619,16 @@ export function refreshAll(portfolio, pnlHistory) {
     renderStatsCards(portfolio);
     renderPositionsTable(currentFilter, portfolio);
     renderCharts(pnlHistory, portfolio);
+}
+
+// --- 实时刷新（不重绘图表）：调仓/新建持仓成功后即时反映最新持仓与估值 ---
+// 直接使用接口返回的事务后组合数据渲染，配合 syncClientState 实现秒级刷新
+export function refreshRealtime(portfolio) {
+    if (!portfolio) return;
+    currentPortfolio = portfolio;
+    updatePriceCache(portfolio);
+    renderStatsCards(portfolio);
+    renderPositionsTable(currentFilter, portfolio);
 }
 
 // --- 筛选（使用存储的portfolio）---

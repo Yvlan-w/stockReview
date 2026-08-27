@@ -14,8 +14,12 @@ services:
     environment:
       # JWT 密钥：生产必须强随机值（.env 生成，勿用代码默认值）
       STOCK_REVIEW_SECRET: ${STOCK_REVIEW_SECRET:?请在 .env 中设置 STOCK_REVIEW_SECRET}
-      # Token 有效期（小时数换算成分钟；默认 720 = 12 小时）
+      # Token 有效期（默认 720 = 12 小时）
       STOCK_REVIEW_TOKEN_TTL: ${STOCK_REVIEW_TOKEN_TTL:-720}
+      # 种子模式（生产建议 first 或 never）
+      STOCK_REVIEW_RUN_SEED: ${STOCK_REVIEW_RUN_SEED:-first}
+      # admin 初始密码（仅首次建号时读取；已存在 admin 则忽略）
+      STOCK_REVIEW_ADMIN_PASSWORD: ${STOCK_REVIEW_ADMIN_PASSWORD:-}
       TZ: Asia/Shanghai
     volumes:
       # SQLite 数据卷：容器重建/升级不丢数据，迁移正式服务器只需拷贝此目录

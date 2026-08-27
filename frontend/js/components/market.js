@@ -553,6 +553,7 @@ function _fmtTurnover(v) {
 // --- 领涨方向分析（高低切） ---
 export function renderLeadershipAnalysis() {
     const container = document.getElementById('leadershipAnalysis');
+    if (!container) return;
     const analysis = marketDataState.analysis;
 
     if (!analysis || !analysis.rotation) {
@@ -645,6 +646,7 @@ export function renderLeadershipAnalysis() {
 // --- 核心驱动因素 ---
 export function renderDriverAnalysis() {
     const container = document.getElementById('driverAnalysis');
+    if (!container) return;
     const analysis = marketDataState.analysis;
 
     if (!analysis || !analysis.drivers) {

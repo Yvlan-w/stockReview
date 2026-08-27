@@ -20,11 +20,13 @@ from ..schemas import (
     ClientCreate, ClientUpdate, RelationsUpdate, PositionsUpdate, ClientOut, ClientCreateOut,
     RiskAlertOut, AlertStatusUpdate, NotificationOut, UnreadCountOut,
     RelationImportRow, RelationExportRow, RelationImportResult,
-    TransactionCreate, TransactionOut,
+    TransactionCreate, TransactionOut, PasswordChange, AdjustRequest,
 )
 from ..services import auth_service, client_service, risk_engine, notification_service
 from ..services import market_service
 from ..services import market_analysis_service
+from ..services.adjust_service import execute_adjust, AdjustError
+from ..services import cost_basis_service
 
 router = APIRouter(prefix="/api")
 
@@ -40,6 +42,18 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 @router.get("/auth/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
     return user
+
+
+# ==================== 自助：修改个人密码（所有登录用户均可） ====================
+@router.post("/users/me/password")
+def change_my_password(body: PasswordChange, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    result = auth_service.change_password(db, user, body.old_password, body.new_password)
+    return {
+        "ok": True,
+        "message": "密码修改成功",
+        "strength_score": result["strength_score"],
+        "strength_label": result["strength_label"],
+    }
 
 
 # ==================== 用户管理（管理员） ====================
@@ -71,6 +85,56 @@ def list_clients(user: User = Depends(get_current_user), db: Session = Depends(g
     return [client_service.serialize_client(c) for c in clients]
 
 
+# 客户盈亏汇总缓存：{user_id: (过期时间戳, 响应体)}。
+# 客户列表筛选会反复渲染，15s 内存缓存避免每次全量重算组合估值。
+_client_summary_cache: dict[str, tuple[float, dict]] = {}
+_CLIENT_SUMMARY_CACHE_TTL = 15.0  # 秒
+
+
+@router.get("/clients/summaries")
+def list_client_summaries(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """批量返回当前用户可见客户的实时盈亏摘要（客户列表用）。
+
+    每客户一次 compute_portfolio（实时价格降级链），结果按用户缓存 15 秒。
+    注意：必须注册在 /clients/{client_id} 之前，否则 summaries 会被当作路径参数。
+    """
+    import time
+
+    now = time.monotonic()
+    cached = _client_summary_cache.get(user.id)
+    if cached and cached[0] > now:
+        data = dict(cached[1])
+        data["cached"] = True
+        return data
+
+    clients = client_service.list_visible_clients(db, user)
+    summaries = {}
+    for c in clients:
+        try:
+            from ..services.pnl_service import compute_portfolio
+            p = compute_portfolio(db, c)
+            summaries[c.id] = {
+                "totalMarketValue": p["totalMarketValue"],
+                "totalPnl": p["totalPnl"],
+                "totalPnlPct": p["totalPnlPct"],
+                # 持仓盈亏（仅当前持仓浮动盈亏，不含已卖出历史收益）
+                "totalFloatingPnl": p["totalFloatingPnl"],
+                "floatingPnlPct": p["floatingPnlPct"],
+                "totalAssets": p["totalAssets"],
+            }
+        except Exception as e:  # 单客户失败不影响其他客户
+            summaries[c.id] = None
+            print(f"[client-summaries] 客户 {c.id} 盈亏计算失败: {e}")
+
+    result = {
+        "summaries": summaries,
+        "updated_at": dt.datetime.now().isoformat(),
+        "cached": False,
+    }
+    _client_summary_cache[user.id] = (now + _CLIENT_SUMMARY_CACHE_TTL, result)
+    return result
+
+
 @router.post("/clients", response_model=ClientCreateOut, status_code=status.HTTP_201_CREATED)
 def create_client(body: ClientCreate, db: Session = Depends(get_db), user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE))):
     client, login = client_service.create_client(db, body, creator=user)
@@ -86,9 +150,14 @@ def get_client(client_id: str, user: User = Depends(get_current_user), db: Sessi
 
 
 @router.put("/clients/{client_id}", response_model=ClientOut)
-def update_client(client_id: str, body: ClientUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_client(
+    client_id: str,
+    body: ClientUpdate,
+    user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE)),
+    db: Session = Depends(get_db),
+):
     client = client_service.get_visible_client(db, user, client_id)
-    client = client_service.update_client_fields(db, client, body)
+    client = client_service.update_client_fields(db, client, body, actor=user)
     return client_service.serialize_client(client)
 
 
@@ -111,11 +180,11 @@ def delete_client(client_id: str, db: Session = Depends(get_db), _: User = Depen
 
 # ==================== 关系映射（管理员） ====================
 @router.put("/clients/{client_id}/relations", response_model=ClientOut)
-def update_relations(client_id: str, body: RelationsUpdate, db: Session = Depends(get_db), _: User = Depends(require_roles(ROLE_ADMIN))):
+def update_relations(client_id: str, body: RelationsUpdate, db: Session = Depends(get_db), user: User = Depends(require_roles(ROLE_ADMIN))):
     client = db.get(Client, client_id)
     if client is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "客户不存在")
-    client = client_service.update_client_relations(db, client, body)
+    client = client_service.update_client_relations(db, client, body, actor=user)
     return client_service.serialize_client(client)
 
 
@@ -186,7 +255,11 @@ async def evaluate_risk(client_id: str, user: User = Depends(get_current_user), 
 @router.get("/clients/{client_id}/alerts", response_model=List[RiskAlertOut])
 def list_alerts(client_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     client_service.get_visible_client(db, user, client_id)  # 校验可见性
-    return db.query(RiskAlert).filter(RiskAlert.client_id == client_id).order_by(RiskAlert.id.desc()).all()
+    # 前端仅展示未解决的预警（open / acknowledged）；已解决不显示，避免列表干扰
+    return db.query(RiskAlert).filter(
+        RiskAlert.client_id == client_id,
+        RiskAlert.status != ALERT_RESOLVED,
+    ).order_by(RiskAlert.id.desc()).all()
 
 
 @router.patch("/alerts/{alert_id}", response_model=RiskAlertOut)
@@ -331,6 +404,22 @@ def get_stock_prices_api(codes: str = "", db: Session = Depends(get_db)):
         },
         "updated_at": dt.datetime.utcnow().isoformat(),
     }
+
+
+@router.get("/stocks/search")
+async def search_stocks_api(
+    keyword: str = "",
+    limit: int = 8,
+    db: Session = Depends(get_db),
+):
+    """按代码 / 名称 / 拼音搜索股票（添加持仓自动填充用，公开接口）。
+
+    返回 [{code, name, price, change_pct, industry, sector}]；
+    sector 为映射到前端板块枚举的行业分类（匹配不上为 null）。
+    """
+    from ..services.stock_price_service import search_stocks as _search
+    results = await _search(db, keyword, limit=limit)
+    return {"results": results}
 
 
 # ==================== 组合估值 / 盈亏 ====================
@@ -562,5 +651,75 @@ def list_transactions(
     client = client_service.get_visible_client(db, user, client_id)
     transactions = db.query(Transaction).filter(
         Transaction.client_id == client_id
-    ).order_by(Transaction.trade_date.desc(), Transaction.id.desc()).limit(limit).all()
+    ).order_by(Transaction.executed_at.desc().nullslast(), Transaction.id.desc()).limit(limit).all()
     return transactions
+
+
+# ========== 调仓执行（含成本批次与 3 种成本法） ==========
+@router.post("/clients/{client_id}/adjust", status_code=201)
+def do_adjust(client_id: str, body: AdjustRequest, db: Session = Depends(get_db),
+              user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR))):
+    """执行一笔调仓（买入/卖出），原子更新：交易流水 + 成本批次 + 持仓 + 现金 + 当日快照。
+
+    cost_method:
+      - average: 移动加权平均（历史默认口径，position.cost_price 维护）
+      - fifo:    先进先出批次匹配
+      - lifo:    后进先出批次匹配
+    """
+    client = client_service.get_visible_client(db, user, client_id)
+    try:
+        result = execute_adjust(
+            db, client,
+            code=body.code, name=body.name, sector=body.sector,
+            action=body.action, quantity=body.quantity, price=body.price,
+            fee_mode=body.fee_mode, fee_value=body.fee_value,
+            trade_date=body.trade_date, from_cash=body.from_cash,
+            cost_method=body.cost_method,  # type: ignore[arg-type]
+        )
+    except AdjustError as e:
+        raise HTTPException(422, detail=str(e)) from e
+    tx = result["transaction"]
+    pos_out = None
+    if result["position"] is not None:
+        p = result["position"]
+        pos_out = {
+            "code": p.code, "name": p.name, "quantity": p.quantity,
+            "cost_price": p.cost_price,
+        }
+    return {
+        "transaction": TransactionOut.model_validate(tx).model_dump(),
+        "position": pos_out,
+        "available_cash": result["available_cash"],
+        "portfolio": result.get("portfolio"),
+        "cost_basis_matches": result.get("cost_basis_matches", []),
+        "cost_method": result.get("cost_method", body.cost_method),
+    }
+
+
+# ========== 策略复盘：成本基础汇总（3 种方法切换） ==========
+@router.get("/clients/{client_id}/cost-basis")
+def get_cost_basis(client_id: str, method: str = "average",
+                   code: Optional[str] = None,
+                   db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """查询客户的成本基础汇总（含未实现盈亏），支持 average / fifo / lifo 三种方法。
+
+    fifo / lifo 基于 CostBasisLot 实际剩余批次 × 含费单位成本，
+    average 基于 position.cost_price 移动加权平均口径。
+    """
+    if method not in ("average", "fifo", "lifo"):
+        raise HTTPException(422, "method 必须为 average / fifo / lifo")
+    client = client_service.get_visible_client(db, user, client_id)
+    return cost_basis_service.summarize_cost_basis(
+        db, client, code=code, method=method,  # type: ignore[arg-type]
+    )
+
+
+# ========== 策略复盘：交易流水按股票分组汇总 ==========
+@router.get("/clients/{client_id}/transactions/summary")
+def get_transactions_summary(client_id: str, code: Optional[str] = None,
+                             db: Session = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    """按股票分组汇总交易流水统计：买卖量额、累计已实现盈亏、手续费分类总计。"""
+    client = client_service.get_visible_client(db, user, client_id)
+    return cost_basis_service.summarize_transactions(db, client, code=code)

@@ -8,6 +8,8 @@ import {
     renderMarketTicker, renderClientList, refreshClientDetail,
     toggleWarnOnly, selectClient, addClientTag, removeClientTag,
     exportClientReport, updateClientNote, evaluateClientRisk, handleAlertStatus,
+    openClientEditModal, closeClientEditModal, submitClientEdit,
+    openTagEditorModal, closeTagEditorModal, addFreeTag, removeFreeTagInEditor, submitTagEditor,
 } from './components/workbench.js';
 import {
     renderVolumeChart, filterPositions, sortTable,
@@ -22,7 +24,7 @@ import {
     executeAdjust, savePosition, deletePosition,
 } from './components/modals.js';
 import {
-    openIdentityModal, closeIdentityModal, exportShareSnapshot,
+    openIdentityModal, closeIdentityModal,
 } from './components/profileOperations.js';
 import {
     initAuth, handleLogin, handleLogout, toggleNotificationPanel,
@@ -42,12 +44,14 @@ import {
 // ---- 暴露给内联 onclick 使用（ES module 作用域隔离）----
 Object.assign(window, {
     renderClientList, toggleWarnOnly, selectClient, addClientTag, removeClientTag,
+    openTagEditorModal, closeTagEditorModal, addFreeTag, removeFreeTagInEditor, submitTagEditor,
     closeAdBanner,
     exportClientReport, updateClientNote, evaluateClientRisk, handleAlertStatus,
+    openClientEditModal, closeClientEditModal, submitClientEdit,
     filterPositions, sortTable,
     refreshMarket,
     fetchLiveNews, showMoreNews,
-    openIdentityModal, closeIdentityModal, exportShareSnapshot,
+    openIdentityModal, closeIdentityModal,
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, deletePosition,
     handleLogin, handleLogout, toggleNotificationPanel, openNotification, markAllRead,
@@ -142,7 +146,14 @@ document.addEventListener('keydown', (e) => {
         closePositionModal();
         closeAdjustModal();
         closeIdentityModal();
-        // 标签编辑弹窗（点其关闭按钮触发统一清理逻辑）
-        document.querySelector('#tagEditorModal [data-close]')?.click();
+        closeTagEditorModal();
+    }
+});
+
+// 标签编辑器自由标签输入框回车即添加
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target?.id === 'freeTagInput') {
+        e.preventDefault();
+        addFreeTag();
     }
 });

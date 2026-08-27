@@ -1,6 +1,4 @@
 """认证与用户管理服务。"""
-import os
-
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -10,9 +8,57 @@ from ..models import (
     SUBROLE_CLIENT, SUBROLE_NON_CLIENT, ROLES,
 )
 from ..schemas import UserCreate
+from ..config import ADMIN_PASSWORD_DEFAULT
 from . import account
 
 MIN_PASSWORD_LENGTH = 6
+# 密码强度：建议至少 8 位、包含大小写字母 + 数字；服务端强制最低 6 位即可通过，
+# 但会在响应里返回强度等级提示前端展示。
+PASSWORD_STRENGTH_STRONG_LEN = 8
+
+
+def _password_strength(pwd: str) -> tuple[int, str]:
+    """返回 (score 0-4, level_label)。"""
+    if not pwd:
+        return 0, "极弱"
+    score = 0
+    has_lower = any(c.islower() for c in pwd)
+    has_upper = any(c.isupper() for c in pwd)
+    has_digit = any(c.isdigit() for c in pwd)
+    has_special = any(not c.isalnum() for c in pwd)
+    if len(pwd) >= PASSWORD_STRENGTH_STRONG_LEN:
+        score += 1
+    if has_lower or has_upper:
+        score += 1
+    if (has_lower and has_upper) or has_digit:
+        score += 1
+    if has_special and (has_lower or has_upper) and has_digit:
+        score += 1
+    levels = ["极弱", "较弱", "一般", "较强", "极强"]
+    return score, levels[min(score, 4)]
+
+
+def change_password(db: Session, user: User, old_password: str, new_password: str) -> dict:
+    """修改当前用户自己的密码。返回 {strength_score, strength_label}。"""
+    if not verify_password(old_password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="原密码错误",
+        )
+    if new_password == old_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="新密码不能与原密码相同",
+        )
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"新密码长度至少 {MIN_PASSWORD_LENGTH} 位",
+        )
+    score, label = _password_strength(new_password)
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    return {"strength_score": score, "strength_label": label}
 
 
 def authenticate(db: Session, username: str, password: str) -> User:
@@ -82,17 +128,11 @@ def create_user(db: Session, data: UserCreate) -> tuple[User, str | None]:
     return user, initial_password
 
 
-# 管理员初始密码（仅首次建号时使用；可用环境变量 STOCK_REVIEW_ADMIN_PASSWORD 覆盖）
-ADMIN_PASSWORD_DEFAULT = os.getenv("STOCK_REVIEW_ADMIN_PASSWORD", "jdzt123456")
-
-
-def seed_default_users(db: Session) -> None:
-    """生产种子：仅幂等创建唯一管理员账号，其余用户表初始为空。"""
-    user = db.get(User, "u_admin")
-    if user is None:
-        user = User(
+def ensure_admin_user(db: Session) -> None:
+    """在当前 Session 内保证至少存在唯一管理员（幂等）。"""
+    if db.get(User, "u_admin") is None:
+        db.add(User(
             id="u_admin", username="admin", name="管理员", role=ROLE_ADMIN,
             password_hash=hash_password(ADMIN_PASSWORD_DEFAULT),
-        )
-        db.add(user)
+        ))
         db.commit()

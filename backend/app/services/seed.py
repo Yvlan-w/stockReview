@@ -1,21 +1,51 @@
-"""数据库种子。
+"""数据库种子入口。
 
-- seed_all(db)：生产启动种子——仅幂等创建唯一管理员账号，不含任何模拟数据。
-- seed_demo_data(db)：演示数据（演示用户 + 演示客户），仅供 pytest 使用，生产不调用。
+分层：
+- seed_all(db)           → 应用启动时调用，由 RUN_SEED + 空库门闩控制是否创建 admin
+- seed_demo_data(db)     → 演示数据（演示用户+演示客户），仅供 pytest 或手动脚本显式调用
+
+关键原则：
+- 生产默认 RUN_SEED=first：仅当 users AND clients 双表为空时，才创建 admin 单账号
+- 非空库启动时 seed_all 对任何业务表零 DML（绝不能改已有用户/客户/持仓数据）
 """
+from __future__ import annotations
+
 from sqlalchemy.orm import Session
 
-from ..models import (
-    User, ROLE_ADMIN, ROLE_ADVISOR, ROLE_SERVICE, ROLE_USER, ROLE_GUEST,
-    SUBROLE_CLIENT, SUBROLE_NON_CLIENT, Client,
-)
-from ..schemas import ClientCreate, PositionIn
-from ..core.security import hash_password
+from ..config import RUN_SEED
+from ..models import Client, User
 from . import auth_service
-from .client_service import create_client
+from . import account  # noqa: F401   ——创建 client id 拼音逻辑依赖初始化
 
 
-# 演示账号密码（仅测试环境；生产环境由管理员在界面创建真实账号）
+def _seed_admin(db: Session) -> None:
+    """仅幂等创建 admin，不 touch 任何其他表。"""
+    auth_service.ensure_admin_user(db)
+
+
+def seed_all(db: Session) -> None:
+    """应用启动入口：由 RUN_SEED 配置 + 空库双重门闩控制。"""
+    if RUN_SEED == "never":
+        return
+
+    if RUN_SEED == "first":
+        users_empty = db.query(User).count() == 0
+        clients_empty = db.query(Client).count() == 0
+        if not (users_empty and clients_empty):
+            return
+
+    _seed_admin(db)
+
+
+# ========= 以下为演示数据（pytest / 手动脚本显式调用），生产永不执行 =========
+from ..core.security import hash_password  # noqa: E402
+from ..models import (  # noqa: E402
+    ROLE_ADVISOR, ROLE_GUEST, ROLE_SERVICE, ROLE_USER,
+    SUBROLE_CLIENT, SUBROLE_NON_CLIENT,
+)
+from ..schemas import ClientCreate, PositionIn  # noqa: E402
+from .client_service import create_client  # noqa: E402
+
 DEMO_PASSWORD = "123456"
 
 _DEMO_ADVISORS = [
@@ -85,19 +115,18 @@ _DEMO_CLIENTS = [
         note="近期考虑增加债券配置", available_cash=40000,
         advisor_id="adv_005", service_ids=["svc_006"],
         positions=[
-            _p("万华化学", "600309", "化工", 1000, 78, 60),
-            _p("长江电力", "600900", "公用", 2000, 24, 25),
+            # 万华化学：成本 200000 / 市值 120000 → 占比 68.6%（stock high），亏 80000
+            _p("万华化学", "600309", "化工", 2000, 100, 60),
+            # 紫金矿业：成本 88000 / 市值 55000 → 占比 31.4%（stock mid），亏 33000
+            _p("紫金矿业", "601899", "化工", 1100, 80, 50),
+            # 合计：总成本 288000，总市值 175000 → 浮亏 -39.2%（激进型 ≤-25% 触发 loss high）
+            # 化工行业 100% → sector high；共 4 条预警：loss/sector high + stock high/mid
         ],
     ),
 ]
 
 
-def seed_all(db: Session) -> None:
-    """生产启动种子：仅创建管理员账号（幂等），无任何模拟数据。"""
-    auth_service.seed_default_users(db)
-
-
-def _ensure_demo_user(db: Session, uid: str, username: str, name: str, role: str, sub_role: str | None = None) -> None:
+def _ensure_demo_user(db, uid, username, name, role, sub_role=None):
     if db.get(User, uid) is None:
         db.add(User(
             id=uid, username=username, name=name, role=role, sub_role=sub_role,
@@ -106,7 +135,8 @@ def _ensure_demo_user(db: Session, uid: str, username: str, name: str, role: str
 
 
 def seed_demo_data(db: Session) -> None:
-    """演示数据（仅供 pytest）：演示用户 + 演示客户。幂等。"""
+    """演示数据（演示用户 + 演示客户）。幂等。仅 pytest / 手动脚本显式调用。"""
+    _seed_admin(db)
     _ensure_demo_user(db, "u_guest", "guest", "游客", ROLE_GUEST)
     _ensure_demo_user(db, "u_client_demo", "client001", "客户·演示", ROLE_USER, SUBROLE_CLIENT)
     _ensure_demo_user(db, "u_user_demo", "user001", "普通用户·演示", ROLE_USER, SUBROLE_NON_CLIENT)

@@ -15,7 +15,7 @@
 import datetime as _dt
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text,
+    Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text,
     UniqueConstraint, PrimaryKeyConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -138,8 +138,9 @@ class RiskAlert(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     client_id = Column(String(64), ForeignKey("clients.id"), nullable=False, index=True)
-    type = Column(String(16), nullable=False)   # loss / sector / stock
-    level = Column(String(16), nullable=False)  # high / mid
+    type = Column(String(16), nullable=False)   # loss / gain / sector / stock
+    level = Column(String(16), nullable=False)  # high / mid / positive
+    dimension = Column(String(64), nullable=True)  # 去重维度：portfolio / <股票代码> / <行业名>
     title = Column(String(128), nullable=False)
     description = Column(Text, default="")
     status = Column(String(16), nullable=False, default=ALERT_OPEN)
@@ -291,12 +292,18 @@ class PnLDailySnapshot(Base):
 
 
 class Transaction(Base):
-    """交易记录（每笔买入/卖出交易的流水记录，含本笔手续费）。
+    """交易记录（每笔买入/卖出交易的流水记录，含本笔手续费全量明细）。
 
     手续费支持两种模式（fee_mode）：
     - 'rate'  按费率：手续费 = 交易金额 × fee_value（如 0.00025 = 万2.5）
     - 'fixed' 固定金额：手续费 = fee_value（元/笔）
     - None    未指定时按全局配置（config.TRADING_FEE_*）计算
+
+    fee_commission / fee_stamp_tax / fee_transfer_fee 三列分别记录 A 股
+    三大类手续费明细：佣金、印花税、过户费；fee_amount 为三者合计。
+    无论 fee_mode 是 rate/fixed/None，均会在写入时填齐 3 个明细列
+    （rate/fixed 自定义时，仅写 fee_commission，其它两项为 0），
+    确保可独立审计、对账与策略复盘费用归因。
     """
     __tablename__ = "transactions"
 
@@ -304,13 +311,71 @@ class Transaction(Base):
     client_id = Column(String(64), ForeignKey("clients.id"), nullable=False, index=True)
     code = Column(String(16), nullable=False, index=True)
     name = Column(String(64), nullable=True)
+    market = Column(String(8), nullable=True)  # 市场：SH/SZ/BJ/HK/US 等
     action = Column(String(8), nullable=False)  # 'buy' / 'sell'
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=False)
-    cost_price = Column(Float, nullable=True)  # 交易时的成本价
+    cost_price = Column(Float, nullable=True)  # 交易时的成本价（加权平均口径）
     fee_mode = Column(String(8), nullable=True)     # 'rate' / 'fixed' / None(全局默认)
     fee_value = Column(Float, nullable=True)        # 费率值或固定金额
-    fee_amount = Column(Float, nullable=False, default=0.0)  # 本笔实际手续费（元）
+    fee_amount = Column(Float, nullable=False, default=0.0)  # 本笔实际手续费合计（元）
+    fee_commission = Column(Float, nullable=False, default=0.0)   # 佣金
+    fee_stamp_tax = Column(Float, nullable=False, default=0.0)    # 印花税
+    fee_transfer_fee = Column(Float, nullable=False, default=0.0)  # 过户费
     realized_pnl = Column(Float, nullable=False, default=0.0)  # 已实现盈亏（卖出时，已扣手续费）
     trade_date = Column(String(10), nullable=False, index=True)
+    executed_at = Column(DateTime, nullable=True, index=True)  # 完整执行时间戳（同秒内按 id 保证稳定排序）
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class CostBasisLot(Base):
+    """成本批次表：支持 FIFO / LIFO 两种批次成本法的匹配回溯。
+
+    每一笔买入都会产生一条批次记录，记录可卖出的剩余数量（remaining_quantity）
+    和该批次含费单位成本。卖出时根据指定方法（FIFO 最早 / LIFO 最新）匹配批次，
+    并按数量比例分摊买入侧费用，计算出精确的已实现盈亏。
+
+    字段说明：
+    - remaining_quantity: 剩余可匹配数量。被卖出匹配后扣减；0 表示该批次已完全平仓。
+    - unit_cost_with_fee: 包含买入侧佣金、过户费的单位成本（= (price*qty + buy_fee)/qty）。
+    - buy_transaction_id: 关联的买入交易流水 id，便于审计溯源。
+    """
+    __tablename__ = "cost_basis_lots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String(64), ForeignKey("clients.id"), nullable=False, index=True)
+    code = Column(String(16), nullable=False, index=True)
+    buy_transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=False, index=True)
+    original_quantity = Column(Integer, nullable=False)
+    remaining_quantity = Column(Integer, nullable=False, index=True)
+    unit_cost_with_fee = Column(Float, nullable=False)  # 含买入侧费用的单位成本
+    buy_fee_total = Column(Float, nullable=False, default=0.0)  # 本批次买入总手续费
+    executed_at = Column(DateTime, nullable=False, index=True)  # 批次时间（用于 FIFO/LIFO 排序）
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_lot_client_code_remaining", "client_id", "code", "remaining_quantity"),
+    )
+
+
+class AuditLog(Base):
+    """操作审计日志：记录所有客户信息 / 关系 / 权限的修改操作，
+    包括操作人、操作时间、修改前后的字段级对比。"""
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 操作人（users.id），可能为空（系统级操作）
+    actor_user_id = Column(String(64), ForeignKey("users.id"), nullable=True, index=True)
+    actor_name = Column(String(64), nullable=True)  # 冗余快照，防止用户被删除后丢失
+    # 操作类别：client.update / client.relations / client.positions / client.delete / user.password
+    action = Column(String(32), nullable=False, index=True)
+    # 目标对象：client / user 等
+    target_type = Column(String(16), nullable=False, index=True)
+    target_id = Column(String(64), nullable=False, index=True)
+    # 修改前快照 / 修改后快照（JSON），按 action 决定包含的字段
+    before_value = Column(JSON, nullable=True)
+    after_value = Column(JSON, nullable=True)
+    # 字段级 diff：{ field: { before, after } }，只记录发生变化的字段
+    diff = Column(JSON, nullable=True)
+    note = Column(String(256), nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)

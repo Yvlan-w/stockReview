@@ -61,3 +61,10 @@ export function clearPriceCache() {
     priceCache = {};
     cacheTime = 0;
 }
+
+/** 设置单只股票价格到缓存（自动填充等场景手动写入，与 portfolio 更新互补） */
+export function setPrice(code, price) {
+    if (!code || !(price > 0)) return;
+    priceCache[code] = price;
+    cacheTime = Date.now();
+}

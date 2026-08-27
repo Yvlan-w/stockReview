@@ -88,6 +88,30 @@ export async function fetchMe() {
     return request('/api/auth/me');
 }
 
+// ---- 自助：修改个人密码（所有登录用户均可） ----
+export async function changePassword(oldPassword, newPassword) {
+    return request('/api/users/me/password', {
+        method: 'POST',
+        body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    });
+}
+
+// 前端密码强度评分（与后端一致的 0-4 极弱/较弱/一般/较强/极强）
+export function passwordStrengthScore(pwd) {
+    if (!pwd) return { score: 0, label: '极弱' };
+    let score = 0;
+    const hasLower = /[a-z]/.test(pwd);
+    const hasUpper = /[A-Z]/.test(pwd);
+    const hasDigit = /\d/.test(pwd);
+    const hasSpecial = /[^A-Za-z0-9]/.test(pwd);
+    if (pwd.length >= 8) score++;
+    if (hasLower || hasUpper) score++;
+    if ((hasLower && hasUpper) || hasDigit) score++;
+    if (hasSpecial && (hasLower || hasUpper) && hasDigit) score++;
+    const levels = ['极弱', '较弱', '一般', '较强', '极强'];
+    return { score: Math.min(score, 4), label: levels[Math.min(score, 4)] };
+}
+
 // ---- 客户接口 ----
 export async function fetchClients() {
     return request('/api/clients');

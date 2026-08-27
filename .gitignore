@@ -27,6 +27,8 @@ venv/
 .venv/
 env/
 .env
+deploy/.env
+deploy/.env.local
 ENV/
 
 # ============================================================

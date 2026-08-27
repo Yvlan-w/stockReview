@@ -92,3 +92,29 @@ export const RISK_BADGE = {
     '积极型': 'bg-orange-100 text-orange-600',
     '激进型': 'bg-negative/10 text-negative'
 };
+
+// ============================================================
+// 客户标签体系（受控分类 + 自由标签共存）
+// 供开户向导、客户资料卡「标签编辑」弹窗、客户筛选器共用。
+// 受控标签分 4 组，3 组单选互斥（资金/偏好/交易频次），1 组可多选（策略限制）。
+// 所有受控标签扁平集 ALL_MANAGED_TAGS，用于区分自由标签（非受控集合内的标签均为自由）。
+// ============================================================
+export const CLIENT_TAG_GROUPS = [
+    {
+        key: 'assets', label: '资金等级', type: 'single',
+        options: ['小资金（<50 万）', '中等资金（50~200 万）', '高净值（200~500 万）', '超高净值（>500 万）'],
+    },
+    {
+        key: 'preference', label: '投资偏好', type: 'single',
+        options: ['稳健偏好', '平衡偏好', '成长偏好', '激进偏好', '债券/固收偏好', '红利/低波动偏好'],
+    },
+    {
+        key: 'constraint', label: '策略限制', type: 'multi',
+        options: ['禁止单票超 30%', '禁止 ST / 亏损股', '禁止融券 / 做空', '限制高波动板块', '禁用杠杆 / 两融', '仅允许宽基 ETF'],
+    },
+    {
+        key: 'frequency', label: '交易频次', type: 'single',
+        options: ['低频（月级调仓）', '中频（周级调仓）', '高频（日内 / 短线）', '持有型（极少操作）'],
+    },
+];
+export const ALL_MANAGED_TAGS = CLIENT_TAG_GROUPS.flatMap(g => g.options);

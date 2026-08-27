@@ -40,6 +40,11 @@ class UserCreateOut(UserOut):
     initial_password: Optional[str] = None   # 自动生成时返回初始密码（明文，仅一次）
 
 
+class PasswordChange(BaseModel):
+    old_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=1, max_length=128)
+
+
 # ---- 持仓 ----
 class PositionIn(BaseModel):
     """持仓录入/更新。现价不再持久化（通过实时行情获取），price 字段仅为向后兼容保留、将被忽略。"""
@@ -86,6 +91,14 @@ class ClientUpdate(BaseModel):
     note: Optional[str] = None
     available_cash: Optional[float] = None
 
+    @model_validator(mode="after")
+    def _validate_cash_and_age(self):
+        if self.available_cash is not None and self.available_cash < 0:
+            raise ValueError("available_cash 必须为非负数")
+        if self.age is not None and (self.age < 0 or self.age > 150):
+            raise ValueError("age 必须在 0-150 之间")
+        return self
+
 
 class RelationsUpdate(BaseModel):
     advisor_id: str
@@ -108,6 +121,7 @@ class ClientOut(BaseModel):
     advisor_id: str
     advisor_name: Optional[str] = None
     service_ids: List[str] = []
+    service_names: List[str] = []
     positions: List[PositionOut] = []
 
 
@@ -122,6 +136,7 @@ class RiskAlertOut(BaseModel):
     client_id: str
     type: str
     level: str
+    dimension: Optional[str] = None
     title: str
     description: str
     status: str
@@ -274,6 +289,7 @@ class TransactionOut(BaseModel):
     client_id: str
     code: str
     name: Optional[str] = None
+    market: Optional[str] = None
     action: str
     quantity: int
     price: float
@@ -281,6 +297,38 @@ class TransactionOut(BaseModel):
     fee_mode: Optional[str] = None
     fee_value: Optional[float] = None
     fee_amount: float
+    fee_commission: float = 0.0
+    fee_stamp_tax: float = 0.0
+    fee_transfer_fee: float = 0.0
     realized_pnl: float
     trade_date: str
+    executed_at: Optional[datetime] = None
     created_at: datetime
+
+
+# ---- 调仓请求 ----
+class AdjustRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=16)
+    name: Optional[str] = None
+    sector: Optional[str] = None
+    action: str = Field(..., pattern="^(buy|sell)$")
+    quantity: int = Field(..., gt=0)
+    price: float = Field(..., gt=0)
+    fee_mode: Optional[str] = Field(None, pattern="^(rate|fixed)$")
+    fee_value: Optional[float] = None
+    trade_date: Optional[str] = None
+    from_cash: bool = True
+    cost_method: str = Field("average", pattern="^(average|fifo|lifo)$")
+
+    @model_validator(mode="after")
+    def _validate_fee(self):
+        if self.fee_mode is None and self.fee_value is not None:
+            raise ValueError("指定 fee_value 时必须同时指定 fee_mode")
+        if self.fee_mode is not None:
+            if self.fee_value is None:
+                raise ValueError(f"指定 fee_mode={self.fee_mode} 时必须同时提供 fee_value")
+            if self.fee_mode == "rate" and not (0 < self.fee_value <= 0.01):
+                raise ValueError("费率需在 (0, 0.01] 之间")
+            if self.fee_mode == "fixed" and not (0 < self.fee_value <= 100000):
+                raise ValueError("固定手续费需在 (0, 100000] 元之间")
+        return self
