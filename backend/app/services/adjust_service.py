@@ -18,7 +18,8 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import Client, Position, Transaction
+from ..models import Client, Position, Transaction, User
+from .audit_service import build_transaction_audit_log
 from .cost_basis_service import (
     CostMethod,
     calculate_sell_realized_pnl,
@@ -42,6 +43,8 @@ def execute_adjust(db: Session, client: Client, *, code: str, action: str,
                    fee_mode: Optional[str] = None,
                    fee_value: Optional[float] = None,
                    trade_date: Optional[str] = None,
+                   executed_at: Optional[dt.datetime] = None,
+                   actor: Optional[User] = None,
                    from_cash: bool = True,
                    cost_method: CostMethod = "average") -> dict:
     """执行一笔调仓（买入/卖出），单事务原子更新所有相关表。
@@ -55,6 +58,11 @@ def execute_adjust(db: Session, client: Client, *, code: str, action: str,
         name / sector: 买入新建持仓时必填；持仓已存在时可选（用于纠错名称）
         fee_mode / fee_value: 手续费模式与数值（None = 全局默认费率）
         trade_date: 交易日期（默认今天）
+        executed_at: 人为指定的完整交易时间戳；None 表示使用服务器当前时间。
+            用于补录历史交易。该值会同时写入 Transaction.executed_at，影响
+            FIFO/LIFO 批次匹配的顺序（按 executed_at + id 稳定排序）。
+        actor: 触发本次调仓的操作用户（admin/service）。用于写入审计日志，
+            回填 transaction.audit_log_id；系统级操作/种子数据时传 None。
         from_cash: 买入资金来源。True=来自账户可用资金（扣减现金，总资产不变，
             现金→持仓内部划转）；False=外部转入持仓（不扣现金、不校验现金充足，
             总资产随之增加）。仅对买入生效，卖出始终回补现金。
@@ -72,8 +80,9 @@ def execute_adjust(db: Session, client: Client, *, code: str, action: str,
         return _execute_adjust_impl(
             db, client, code=code, action=action, quantity=quantity,
             price=price, name=name, sector=sector, fee_mode=fee_mode,
-            fee_value=fee_value, trade_date=trade_date, from_cash=from_cash,
-            cost_method=cost_method,
+            fee_value=fee_value, trade_date=trade_date,
+            executed_at=executed_at, actor=actor,
+            from_cash=from_cash, cost_method=cost_method,
         )
     except Exception:
         db.rollback()
@@ -94,10 +103,13 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
                          quantity: int, price: float,
                          name: Optional[str], sector: Optional[str],
                          fee_mode: Optional[str], fee_value: Optional[float],
-                         trade_date: Optional[str], from_cash: bool,
+                         trade_date: Optional[str],
+                         executed_at: Optional[dt.datetime],
+                         actor: Optional[User],
+                         from_cash: bool,
                          cost_method: CostMethod) -> dict:
-    # 交易时间戳：使用系统时间；trade_date 仅日期
-    executed_at = dt.datetime.utcnow()
+    # 交易时间戳：优先使用调用方人为指定值；否则使用服务器当前 UTC 时间
+    executed_at = executed_at if executed_at is not None else dt.datetime.utcnow()
     date_str = trade_date or executed_at.date().isoformat()
     amount = quantity * price
     market = infer_market_from_code(code)
@@ -150,6 +162,37 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
         raise AdjustError(f"非法操作类型：{action}")
 
     # ------------------------------------------------------------------
+    # 提前计算：交易前后的成本价（用于 Transaction.cost_price / prev_cost_price）
+    #   - tx_cost_price ：交易完成后的持仓成本价（用户看到的"成本价"）
+    #   - prev_cost_price：交易发生前的持仓成本价（括号中的变化差值 = tx - prev）
+    # 提前计算的原因：Transaction 写入在步骤②，但持仓更新在步骤④⑤，且
+    #   新建持仓时原先仅在步骤④算 new_cost，导致 Transaction.cost_price 取到 None（历史 bug）。
+    # ------------------------------------------------------------------
+    prev_cost_price: Optional[float] = None
+    tx_cost_price: Optional[float] = None
+
+    if action == "buy":
+        if position is None:
+            # 新仓：无前成本，交易后成本 = 含费买入成本
+            prev_cost_price = None
+            tx_cost_price = (amount + fee_amount) / quantity
+        else:
+            # 加仓：移动加权
+            prev_cost_price = position.cost_price
+            old_value = position.quantity * position.cost_price
+            new_qty = position.quantity + quantity
+            tx_cost_price = (old_value + amount + fee_amount) / new_qty
+    else:  # sell
+        if position is not None:
+            prev_cost_price = position.cost_price
+            if quantity >= position.quantity:
+                # 清仓：持仓被删，交易后成本价不存在
+                tx_cost_price = None
+            else:
+                # 部分卖出：成本价保持不变（卖出不减摊成本）
+                tx_cost_price = position.cost_price
+
+    # ------------------------------------------------------------------
     # ② 先写 Transaction（CostBasisLot.buy_transaction_id 需要其 id）
     # ------------------------------------------------------------------
     transaction = Transaction(
@@ -157,7 +200,8 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
         name=name or (position.name if position else None),
         market=market,
         action=action, quantity=quantity, price=price,
-        cost_price=(position.cost_price if position else None),
+        cost_price=(round(tx_cost_price, 4) if tx_cost_price is not None else None),
+        prev_cost_price=(round(prev_cost_price, 4) if prev_cost_price is not None else None),
         fee_mode=fee_mode if fee_mode else None,
         fee_value=fee_value if fee_mode else None,
         fee_amount=round(fee_amount, 4),
@@ -170,6 +214,17 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
     )
     db.add(transaction)
     db.flush()  # 取 id
+
+    # ------------------------------------------------------------------
+    # ②-1：写 Transaction 级审计尾链（与 Transaction 同事务 flush，不单独 commit）
+    #       好处：若后续业务报错 rollback，AuditLog 同 rollback，不会留"幽灵记录"
+    #       actor=None 场景（种子/系统/公司行动）允许 audit_log_id 为空（nullable FK）
+    # ------------------------------------------------------------------
+    audit_log = build_transaction_audit_log(
+        db, actor=actor, client=client, transaction=transaction, from_cash=from_cash,
+    )
+    transaction.audit_log_id = audit_log.id
+    db.flush()
 
     # ------------------------------------------------------------------
     # ③ 买入：创建成本批次；卖出：批次已在 calculate_sell_realized_pnl 内消费
@@ -191,20 +246,16 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
     # ------------------------------------------------------------------
     if action == "buy":
         if position is None:
-            # 新建持仓：含费成本价 = (金额 + 手续费) / 数量（平均法口径）
-            new_cost = (amount + fee_amount) / quantity
+            # 新建持仓：含费成本价已提前算好（= tx_cost_price）
             position = Position(
                 client_id=client.id, code=code, name=name, sector=sector,
-                quantity=quantity, cost_price=round(new_cost, 4),
+                quantity=quantity, cost_price=round(tx_cost_price, 4),
             )
             db.add(position)
         else:
-            # 加仓：含费移动加权平均
-            old_value = position.quantity * position.cost_price
-            new_qty = position.quantity + quantity
-            new_cost = (old_value + amount + fee_amount) / new_qty
-            position.quantity = new_qty
-            position.cost_price = round(new_cost, 4)
+            # 加仓：移动加权结果已提前算好（= tx_cost_price）
+            position.quantity += quantity
+            position.cost_price = round(tx_cost_price, 4)
             if name:
                 position.name = name
             if sector:

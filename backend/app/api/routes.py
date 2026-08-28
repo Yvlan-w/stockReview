@@ -5,49 +5,126 @@ import io
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from ..core.deps import get_current_user, require_roles
 from ..core.security import create_access_token
 from ..database import get_db
 from ..models import (
-    User, Client, Position, RiskAlert, Notification, Transaction,
+    User, Client, Position, RiskAlert, Notification, Transaction, AuditLog,
     ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR, ROLE_USER,
     ALERT_OPEN, ALERT_ACK, ALERT_RESOLVED,
+    USER_STATUS_DELETED, USER_STATUS_ACTIVE, USER_STATUS_EXPIRED,
+    SUBROLE_CLIENT, SUBROLE_NON_CLIENT,
 )
 from ..schemas import (
-    LoginRequest, TokenOut, UserOut, UserCreate, UserCreateOut, UserOptionsOut,
+    LoginRequest, TokenOut, UserOut, UserCreate, UserCreateOut, UserOptionsOut, UserUpdate,
     ClientCreate, ClientUpdate, RelationsUpdate, PositionsUpdate, ClientOut, ClientCreateOut,
     RiskAlertOut, AlertStatusUpdate, NotificationOut, UnreadCountOut,
     RelationImportRow, RelationExportRow, RelationImportResult,
     TransactionCreate, TransactionOut, PasswordChange, AdjustRequest,
+    UserRenew, UserResetPassword, UserStatusPatch, AuditLogPage,
 )
 from ..services import auth_service, client_service, risk_engine, notification_service
 from ..services import market_service
 from ..services import market_analysis_service
 from ..services.adjust_service import execute_adjust, AdjustError
 from ..services import cost_basis_service
+from ..services.audit_service import log_user_activity
 
 router = APIRouter(prefix="/api")
 
 
+def _serialize_user_out(user: User, db: Session | None = None) -> dict:
+    """在返回前补 remaining_days + client_id + 老库 status 兜底。
+
+    - client_id：当 role=user 且 sub_role=client 时，通过 owner_user_id 反查 Client 表
+      得到客户档案编号。调用 list_users 等场景下 db 可用时直接查询；调用方没传 db 时
+      为 None（避免把 DB 查询逻辑塞进 ORM 模型序列化里）。
+    - status：老库可能 status IS NULL（没迁移 NOT NULL 或迁移前遗留），
+      在交给 Pydantic 之前先规范化为 USER_STATUS_ACTIVE，避免 UserOut 校验
+      （status 字段要求是 str）报错。
+    """
+    # 先对 ORM 对象的 status 做一次非破坏性兜底（不写 DB，只序列化时替换）
+    if getattr(user, "status", None) is None:
+        # 不用 user.status = xxx，避免触发 ORM session flush 警告；
+        # 转而在 UserOut.model_validate 之前先 by-alias 转 dict 再补默认值
+        import copy as _copy
+        user_proxy = _copy.copy(user)
+        try:
+            user_proxy.status = USER_STATUS_ACTIVE
+        except Exception:
+            user_proxy = user  # fallback：User 类不支持浅拷贝属性赋值时用下面的 payload 兜底
+    else:
+        user_proxy = user
+    payload = UserOut.model_validate(user_proxy).model_dump()
+    # Pydantic 默认值与 ORM 赋值都不工作时（比如 User 实例无法浅拷贝 status），
+    # 最后在 payload dict 层再兜底一次
+    if not payload.get("status"):
+        payload["status"] = USER_STATUS_ACTIVE
+    payload["remaining_days"] = auth_service.compute_remaining_days(user)
+    if (db is not None
+            and payload.get("role") == "user"
+            and payload.get("sub_role") == "client"
+            and payload.get("client_id") in (None, "")):
+        linked = (db.query(Client.id)
+                  .filter(Client.owner_user_id == user.id)
+                  .order_by(Client.created_at.desc())
+                  .first())
+        if linked:
+            payload["client_id"] = linked[0]
+    return payload
+
+
 # ==================== 认证 ====================
 @router.post("/auth/login", response_model=TokenOut)
-def login(body: LoginRequest, db: Session = Depends(get_db)):
-    user = auth_service.authenticate(db, body.username, body.password)
+def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("User-Agent")
+    try:
+        user = auth_service.authenticate(db, body.username, body.password)
+    except HTTPException as he:
+        # 登录失败：记一条审计日志（actor=None，target_user_id=尝试的用户名，便于溯源）
+        log_user_activity(
+            db, actor=None, action="user.login_failed",
+            target_user_id=body.username,
+            note=f"用户名={body.username} 原因={he.detail}",
+            ip_address=ip, user_agent=ua,
+        )
+        raise
+    # 登录成功
+    log_user_activity(
+        db, actor=user, action="user.login_success",
+        target_user=user,
+        note=f"用户 {user.username} 登录成功",
+        ip_address=ip, user_agent=ua,
+    )
     token = create_access_token(user.id, user.role, user.sub_role)
-    return {"access_token": token, "token_type": "bearer", "user": UserOut.model_validate(user)}
+    return {"access_token": token, "token_type": "bearer", "user": _serialize_user_out(user, db=db)}
 
 
 @router.get("/auth/me", response_model=UserOut)
-def me(user: User = Depends(get_current_user)):
-    return user
+def me(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    # 每次拉 /me 时同步刷新一次 expired 状态（避免过了零点仍显示"还有 1 天"）
+    auth_service.sync_expired_status(db, user)
+    return _serialize_user_out(user, db=db)
 
 
 # ==================== 自助：修改个人密码（所有登录用户均可） ====================
 @router.post("/users/me/password")
-def change_my_password(body: PasswordChange, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def change_my_password(body: PasswordChange, request: Request,
+                       db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     result = auth_service.change_password(db, user, body.old_password, body.new_password)
+    # 修改密码成功：写审计（password 字段 masked；before/after 都是 ***）
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("User-Agent")
+    log_user_activity(
+        db, actor=user, action="user.password_change",
+        target_user=user,
+        note="用户自行修改密码成功",
+        ip_address=ip, user_agent=ua,
+    )
     return {
         "ok": True,
         "message": "密码修改成功",
@@ -59,23 +136,367 @@ def change_my_password(body: PasswordChange, db: Session = Depends(get_db), user
 # ==================== 用户管理（管理员） ====================
 @router.get("/users", response_model=List[UserOut])
 def list_users(db: Session = Depends(get_db), _: User = Depends(require_roles(ROLE_ADMIN))):
-    return db.query(User).order_by(User.id).all()
+    # 关键点：使用 .isnot(DELETED) 而不是 != DELETED，
+    #   - SQLite 中 `NULL != 'deleted'` → NULL（WHERE 视为 False，会被过滤掉）
+    #   - `status IS NOT 'deleted'` → NULL 仍然保留（老数据 status 为空的账户也能显示出来）
+    rows = (db.query(User)
+            .filter(User.status.isnot(USER_STATUS_DELETED))
+            .order_by(User.id).all())
+    for u in rows:
+        auth_service.sync_expired_status(db, u)
+    return [_serialize_user_out(u, db=db) for u in rows]
 
 
 @router.get("/users/options", response_model=UserOptionsOut)
 def user_options(db: Session = Depends(get_db), _: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE))):
     """开户/关系映射表单的顾问、客服下拉选项。"""
-    advisors = db.query(User).filter(User.role == ROLE_ADVISOR, User.is_active.is_(True)).order_by(User.id).all()
-    services = db.query(User).filter(User.role == ROLE_SERVICE, User.is_active.is_(True)).order_by(User.id).all()
+    advisors = (db.query(User)
+                .filter(User.role == ROLE_ADVISOR, User.is_active.is_(True),
+                        User.status.isnot(USER_STATUS_DELETED))
+                .order_by(User.id).all())
+    services = (db.query(User)
+                .filter(User.role == ROLE_SERVICE, User.is_active.is_(True),
+                        User.status.isnot(USER_STATUS_DELETED))
+                .order_by(User.id).all())
     return {"advisors": advisors, "services": services}
 
 
 @router.post("/users", response_model=UserCreateOut, status_code=status.HTTP_201_CREATED)
-def create_user(body: UserCreate, db: Session = Depends(get_db), _: User = Depends(require_roles(ROLE_ADMIN))):
+def create_user(body: UserCreate, request: Request,
+                db: Session = Depends(get_db),
+                admin_actor: User = Depends(require_roles(ROLE_ADMIN))):
     user, initial_password = auth_service.create_user(db, body)
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("User-Agent")
+
+    # 当 role=user 且 sub_role=client 时：同步创建 Client 档案并挂 owner_user_id
+    # 否则该 user 无法操作持仓（权限矩阵要求 owner_user_id 对应的 Client 存在）
+    created_client_id: str | None = None
+    if body.role == ROLE_USER and body.sub_role == "client":
+        # 管理员账户 Tab 可留空投顾与客服：不自动兜底，此时 client 只挂 owner_user_id，
+        # 由账号本人登录后管理自己的持仓（owner 角色数据范围仅依赖 owner_user_id 命中）。
+        advisor_id = body.client_advisor_id or None
+        service_ids = list(body.client_service_ids or [])
+
+        client_create = ClientCreate(
+            name=user.name,
+            advisor_id=advisor_id,
+            service_ids=service_ids,
+            owner_user_id=user.id,
+            risk_level=body.client_risk_level,
+            available_cash=body.client_available_cash,
+            create_login=False,  # 登录账号已经创建，别再绕回来
+        )
+        # 复用 create_client 的事务 + 审计逻辑（client.create + user.create 开户同步那条；
+        # user.create 我们已经在下面单独写过一次，create_client 内部那条用 target_user=None 避免重复）
+        created_client, _ = client_service.create_client(
+            db, client_create, creator=admin_actor,
+            ip_address=ip, request_user_agent=ua,
+        )
+        created_client_id = created_client.id
+
+    # 创建新用户：写审计（before=None，after=新用户快照）
+    note = f"Admin {admin_actor.username} 创建新用户：role={user.role} username={user.username}"
+    if created_client_id:
+        note += f" （同步生成客户档案 {created_client_id}）"
+    log_user_activity(
+        db, actor=admin_actor, action="user.create",
+        target_user=user,
+        note=note,
+        ip_address=ip, user_agent=ua,
+    )
     out = UserCreateOut.model_validate(user)
     out.initial_password = initial_password
-    return out
+    out.client_id = created_client_id
+    payload = out.model_dump()
+    # 与其他 UserOut 系列响应保持一致：补 remaining_days + client_id 兜底查询
+    payload["remaining_days"] = auth_service.compute_remaining_days(user)
+    if (db is not None
+            and payload.get("role") == "user"
+            and payload.get("sub_role") == "client"
+            and payload.get("client_id") in (None, "")):
+        linked = (db.query(Client.id)
+                  .filter(Client.owner_user_id == user.id)
+                  .order_by(Client.created_at.desc())
+                  .first())
+        if linked:
+            payload["client_id"] = linked[0]
+    return payload
+
+
+@router.put("/users/{user_id}", response_model=UserOut)
+def update_user_route(user_id: str, body: UserUpdate, request: Request,
+                      db: Session = Depends(get_db),
+                      admin_actor: User = Depends(require_roles(ROLE_ADMIN))):
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    # before 快照必须取在修改前，字段口径与 _snapshot_user 完全对齐避免假 diff
+    before = {
+        "id": target.id, "username": target.username, "name": target.name,
+        "email": getattr(target, "email", None) or "",
+        "role": target.role, "is_active": bool(target.is_active),
+    }
+    # sub_role 仅 User 角色有值时才放进去，避免每次非 user 角色都显示 sub_role: None→None 的假 diff
+    sub_role = getattr(target, "sub_role", None)
+    if sub_role is not None:
+        before["sub_role"] = sub_role
+    updated = auth_service.update_user(db, target, body)
+    ip = request.client.host if request.client else None
+    log_user_activity(
+        db, actor=admin_actor, action="user.update", target_user=updated,
+        before=before, fields=("name", "email", "role", "sub_role", "is_active"),
+        note=f"Admin {admin_actor.username} 更新用户 {updated.username} 资料",
+        ip_address=ip,
+    )
+    return updated
+
+
+# —— 注意：FastAPI 路由匹配按注册顺序，`/users/me` 必须放在 `/users/{user_id}` 之前，否则会被路径参数吞掉 404 ——
+@router.delete("/users/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_self_route(request: Request,
+                      user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """当前登录的普通用户删除自己的账户（软删除）。
+
+    仅 ROLE_USER（用户·普通 / 用户·客户）允许调用；
+    管理员 / 客服 / 投顾角色禁止（此入口是给用户自助注销用的）。
+    """
+    if user.role != ROLE_USER:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "当前角色不允许自助删除账户，请联系管理员处理",
+        )
+    before = {
+        "id": user.id, "username": user.username, "name": user.name,
+        "email": getattr(user, "email", None) or "",
+        "role": user.role, "is_active": bool(user.is_active),
+        "status": getattr(user, "status", "active"),
+        "expires_at": getattr(user, "expires_at", None).isoformat() if getattr(user, "expires_at", None) else None,
+    }
+    sub_role = getattr(user, "sub_role", None)
+    if sub_role is not None:
+        before["sub_role"] = sub_role
+    ip = request.client.host if request.client else None
+    auth_service.delete_user(db, user)
+    log_user_activity(
+        db, actor=user, action="user.delete_self", target_user=user,
+        before=before,
+        note=f"User {before['username']} 自助注销账户（软删除）",
+        ip_address=ip,
+    )
+    return None
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user_route(user_id: str, request: Request,
+                      db: Session = Depends(get_db),
+                      admin_actor: User = Depends(require_roles(ROLE_ADMIN))):
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    # 先取快照再软删（删完 is_active=false，仍在 DB）
+    before = {
+        "id": target.id, "username": target.username, "name": target.name,
+        "email": getattr(target, "email", None) or "",
+        "role": target.role, "is_active": bool(target.is_active),
+        "status": getattr(target, "status", "active"),
+        "expires_at": getattr(target, "expires_at", None).isoformat() if getattr(target, "expires_at", None) else None,
+    }
+    sub_role = getattr(target, "sub_role", None)
+    if sub_role is not None:
+        before["sub_role"] = sub_role
+    ip = request.client.host if request.client else None
+    auth_service.delete_user(db, target)
+    log_user_activity(
+        db, actor=admin_actor, action="user.delete", target_user=target,
+        before=before,
+        note=f"Admin {admin_actor.username} 软删除用户 {before['username']}",
+        ip_address=ip,
+    )
+    return None
+
+
+@router.delete("/users/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_self_route(request: Request,
+                      user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """当前登录的普通用户删除自己的账户（软删除）。
+
+    仅 ROLE_USER（用户·普通 / 用户·客户）允许调用；
+    管理员 / 客服 / 投顾角色禁止（此入口是给用户自助注销用的）。
+    """
+    if user.role != ROLE_USER:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "当前角色不允许自助删除账户，请联系管理员处理",
+        )
+    before = {
+        "id": user.id, "username": user.username, "name": user.name,
+        "email": getattr(user, "email", None) or "",
+        "role": user.role, "is_active": bool(user.is_active),
+        "status": getattr(user, "status", "active"),
+        "expires_at": getattr(user, "expires_at", None).isoformat() if getattr(user, "expires_at", None) else None,
+    }
+    sub_role = getattr(user, "sub_role", None)
+    if sub_role is not None:
+        before["sub_role"] = sub_role
+    ip = request.client.host if request.client else None
+    auth_service.delete_user(db, user)
+    log_user_activity(
+        db, actor=user, action="user.delete_self", target_user=user,
+        before=before,
+        note=f"User {before['username']} 自助注销账户（软删除）",
+        ip_address=ip,
+    )
+    return None
+
+
+# ---- 账户生命周期管理（充值续费、重置密码、生命周期 patch）----
+@router.post("/users/{user_id}/renew", response_model=UserOut)
+def renew_user_route(user_id: str, body: UserRenew, request: Request,
+                     db: Session = Depends(get_db),
+                     admin_actor: User = Depends(require_roles(ROLE_ADMIN))):
+    """充值续费：预留账户续费接口。"""
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    before = {
+        "status": getattr(target, "status", "active"),
+        "expires_at": target.expires_at.isoformat() if target.expires_at else None,
+        "remaining_days_before": auth_service.compute_remaining_days(target),
+    }
+    updated = auth_service.renew_user(db, target, body.extend_days)
+    ip = request.client.host if request.client else None
+    log_user_activity(
+        db, actor=admin_actor, action="user.renew", target_user=updated,
+        before=before,
+        fields=("status", "expires_at"),
+        note=f"Admin {admin_actor.username} 续费账户 {updated.username} {body.extend_days:+d} 天",
+        ip_address=ip, user_agent=request.headers.get("User-Agent"),
+    )
+    return _serialize_user_out(updated, db=db)
+
+
+@router.post("/users/{user_id}/reset-password")
+def reset_password_route(user_id: str, body: UserResetPassword, request: Request,
+                         db: Session = Depends(get_db),
+                         admin_actor: User = Depends(require_roles(ROLE_ADMIN))):
+    """管理员一键重置密码；返回新密码明文一次。"""
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    new_pwd, generated = auth_service.reset_user_password(db, target, body.password)
+    ip = request.client.host if request.client else None
+    log_user_activity(
+        db, actor=admin_actor, action="user.password_reset", target_user=target,
+        note=f"Admin {admin_actor.username} 重置 {target.username} 密码（{'自动生成' if generated else '指定'}）",
+        ip_address=ip,
+    )
+    return {
+        "ok": True,
+        "new_password": new_pwd,
+        "generated": generated,
+    }
+
+
+@router.patch("/users/{user_id}/lifecycle", response_model=UserOut)
+def lifecycle_patch(user_id: str, body: UserStatusPatch, request: Request,
+                    db: Session = Depends(get_db),
+                    admin_actor: User = Depends(require_roles(ROLE_ADMIN))):
+    """管理账户生命周期：改 status / 过期日 / 或直接设置新的 license_days。"""
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    before = {
+        "status": getattr(target, "status", "active"),
+        "expires_at": target.expires_at.isoformat() if target.expires_at else None,
+        "remaining_days": auth_service.compute_remaining_days(target),
+    }
+    updated = auth_service.patch_user_lifecycle(
+        db, target, new_status=body.status, expires_at=body.expires_at, license_days=body.license_days,
+    )
+    ip = request.client.host if request.client else None
+    log_user_activity(
+        db, actor=admin_actor, action="user.lifecycle", target_user=updated,
+        before=before, fields=("status", "expires_at"),
+        note=(f"Admin {admin_actor.username} 修改 {updated.username} 生命周期："
+              f"status={body.status} license_days={body.license_days} expires_at={body.expires_at}"),
+        ip_address=ip,
+    )
+    return _serialize_user_out(updated, db=db)
+
+
+@router.post("/users/{user_id}/ensure-client-profile")
+def ensure_client_profile_route(user_id: str, request: Request,
+                                db: Session = Depends(get_db),
+                                admin_actor: User = Depends(require_roles(ROLE_ADMIN))):
+    """补齐/迁移用户到「客户」子角色，并保证拥有一个绑定的客户档案。
+
+    行为分两类：
+      1) role=user + sub_role=client ：已在客户角色，但缺少 Client 档案 → 建档（原接口语义，保持不变）
+      2) role=user + sub_role=non_client ：是「非客户普通用户」，管理员点「分配关系」后
+         需要先转为客户 → sub_role 改成 client → 再创建档案并绑定 owner_user_id。
+
+    对 advisor/service/admin 等非 user 角色仍直接拒绝。
+
+    返回:
+      - client_id            已有的 / 新创建的客户编号
+      - created              True 表示本次新建, False 表示已存在直接复用
+      - role_changed         True 当本次把 sub_role 从 non_client 改为 client（前端据此提示）
+    """
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    if target.status == USER_STATUS_DELETED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "该账户已删除，无法补齐客户档案")
+    if target.role != ROLE_USER:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"仅 user 角色可以建立客户档案（当前 role={target.role}）",
+        )
+
+    # 情况 B：sub_role=non_client 的普通用户 → 管理员分配关系时自动升级为 client
+    role_changed = False
+    if target.sub_role is None or target.sub_role == SUBROLE_NON_CLIENT:
+        target.sub_role = SUBROLE_CLIENT
+        db.flush()
+        role_changed = True
+
+    # 先看有没有已经通过 owner_user_id 关联的客户档案
+    existing = (db.query(Client)
+                .filter(Client.owner_user_id == target.id)
+                .order_by(Client.created_at.desc())
+                .first())
+    if existing is not None:
+        db.commit()
+        return {"client_id": existing.id, "created": False, "role_changed": role_changed}
+
+    # 没有 → 自动创建一个；以用户姓名命名，不强制分配顾问/客服（后续在「分配关系」里再设置）
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("User-Agent")
+    client_create = ClientCreate(
+        name=target.name,
+        owner_user_id=target.id,
+        advisor_id=None,
+        service_ids=[],
+        create_login=False,
+    )
+    created_client, _ = client_service.create_client(
+        db, client_create, creator=admin_actor,
+        ip_address=ip, request_user_agent=ua,
+    )
+    # 写审计（与开户同步建立档案保持一致）
+    log_user_activity(
+        db, actor=admin_actor, action="user.create_client_profile",
+        target_user=target,
+        note=(
+            f"Admin {admin_actor.username} 为 {target.username} 补齐客户档案 {created_client.id}"
+            + ("（本次同步将 sub_role 从 non_client → client）" if role_changed else "")
+        ),
+        ip_address=ip, user_agent=ua,
+    )
+    return {"client_id": created_client.id, "created": True, "role_changed": role_changed}
 
 
 # ==================== 客户 ====================
@@ -136,11 +557,44 @@ def list_client_summaries(user: User = Depends(get_current_user), db: Session = 
 
 
 @router.post("/clients", response_model=ClientCreateOut, status_code=status.HTTP_201_CREATED)
-def create_client(body: ClientCreate, db: Session = Depends(get_db), user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE))):
-    client, login = client_service.create_client(db, body, creator=user)
+def create_client(body: ClientCreate, request: Request,
+                  db: Session = Depends(get_db),
+                  user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE))):
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("User-Agent")
+    client, login = client_service.create_client(db, body, creator=user,
+                                                 ip_address=ip, request_user_agent=ua)
     result = client_service.serialize_client(client)
     result["login"] = login
     return result
+
+
+@router.delete("/clients/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_client(client_id: str, request: Request, db: Session = Depends(get_db),
+                  actor: User = Depends(require_roles(ROLE_ADMIN))):
+    client = db.get(Client, client_id)
+    if client is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "客户不存在")
+    before = {
+        **client_service._audit._snapshot_client_basic(client),
+        "advisor_id": client.advisor_id,
+        "service_ids": list(client.service_ids),
+        "owner_user_id": client.owner_user_id,
+        "position_count": len(client.positions),
+    }
+    db.delete(client)
+    db.commit()
+    # 审计：client.delete
+    client_service._audit.log_client_change(
+        db, actor=actor, action="client.delete",
+        # delete 后对象 detached，构造最小 fake client 仅提供 id 字段给 log_client_change 使用
+        client=type("__DeletedClient", (), {"id": client_id})(),
+        before=before, after=None,
+        note=f"Admin {actor.name} 删除客户 {before['name']}(id={client_id})，"
+             f"关联持仓 {before['position_count']} 条、客服 {before['service_ids']}",
+        ip_address=(request.client.host if request.client else None),
+    )
+    return None
 
 
 @router.get("/clients/{client_id}", response_model=ClientOut)
@@ -153,10 +607,33 @@ def get_client(client_id: str, user: User = Depends(get_current_user), db: Sessi
 def update_client(
     client_id: str,
     body: ClientUpdate,
-    user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE)),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     client = client_service.get_visible_client(db, user, client_id)
+
+    # ---- 字段级权限校验（避免 advisor / 用户自身修改 name/age/risk_level 等管理字段）----
+    # 允许的字段集合按角色拆分：
+    # - ADMIN / SERVICE：FIELDS_BASIC 全量（name/age/risk_level/tags/note/available_cash）
+    # - ADVISOR / 客户本人（ROLE_USER 且 client.owner_user_id == user.id）：仅 tags / note
+    body_dict = body.model_dump(exclude_unset=True)
+    ALLOWED_ADV_OR_SELF = {"tags", "note"}
+    if user.role not in (ROLE_ADMIN, ROLE_SERVICE):
+        for key in body_dict.keys():
+            if key not in ALLOWED_ADV_OR_SELF:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    f"无权限修改字段「{key}」，当前角色仅可修改：{', '.join(sorted(ALLOWED_ADV_OR_SELF))}",
+                )
+        if user.role == ROLE_ADVISOR:
+            # advisor 只能改自己负责的客户（get_visible_client 已确保 advisor_id==user.id，但仍兜底校验）
+            if client.advisor_id != user.id:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "仅可修改自己所负责客户的标签与备注")
+        if user.role == ROLE_USER:
+            # 客户本人：仅能改自己档案（owner_user_id == user.id）
+            if client.owner_user_id != user.id:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "仅可修改本人客户档案的标签与备注")
+
     client = client_service.update_client_fields(db, client, body, actor=user)
     return client_service.serialize_client(client)
 
@@ -166,16 +643,6 @@ def update_client_positions(client_id: str, body: PositionsUpdate, user: User = 
     client = client_service.get_visible_client(db, user, client_id)
     client = client_service.update_client_positions(db, client, body.positions)
     return client_service.serialize_client(client)
-
-
-@router.delete("/clients/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_client(client_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles(ROLE_ADMIN))):
-    client = db.get(Client, client_id)
-    if client is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "客户不存在")
-    db.delete(client)
-    db.commit()
-    return None
 
 
 # ==================== 关系映射（管理员） ====================
@@ -298,6 +765,19 @@ def unread_count(user: User = Depends(get_current_user), db: Session = Depends(g
         .count()
     )
     return {"unread": count}
+
+
+@router.get("/notifications/{notification_id}", response_model=NotificationOut)
+def get_notification(notification_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """获取单个站内信详情（打开详情时自动标记已读）。"""
+    n = db.get(Notification, notification_id)
+    if n is None or n.recipient_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "消息不存在")
+    if not n.is_read:
+        n.is_read = True
+        db.commit()
+        db.refresh(n)
+    return n
 
 
 @router.post("/notifications/{notification_id}/read", response_model=NotificationOut)
@@ -658,13 +1138,12 @@ def list_transactions(
 # ========== 调仓执行（含成本批次与 3 种成本法） ==========
 @router.post("/clients/{client_id}/adjust", status_code=201)
 def do_adjust(client_id: str, body: AdjustRequest, db: Session = Depends(get_db),
-              user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR))):
+              user: User = Depends(require_roles(ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR, ROLE_USER))):
     """执行一笔调仓（买入/卖出），原子更新：交易流水 + 成本批次 + 持仓 + 现金 + 当日快照。
 
-    cost_method:
-      - average: 移动加权平均（历史默认口径，position.cost_price 维护）
-      - fifo:    先进先出批次匹配
-      - lifo:    后进先出批次匹配
+    角色范围：
+      - ROLE_USER(客户) 仅能操作自己 owner_user_id 名下的客户档案
+      - 其余三角色按既有数据范围（advisor/service 只看自己的客户）受 get_visible_client 进一步约束
     """
     client = client_service.get_visible_client(db, user, client_id)
     try:
@@ -673,7 +1152,9 @@ def do_adjust(client_id: str, body: AdjustRequest, db: Session = Depends(get_db)
             code=body.code, name=body.name, sector=body.sector,
             action=body.action, quantity=body.quantity, price=body.price,
             fee_mode=body.fee_mode, fee_value=body.fee_value,
-            trade_date=body.trade_date, from_cash=body.from_cash,
+            trade_date=body.trade_date, executed_at=body.executed_at,
+            actor=user,
+            from_cash=body.from_cash,
             cost_method=body.cost_method,  # type: ignore[arg-type]
         )
     except AdjustError as e:
@@ -723,3 +1204,54 @@ def get_transactions_summary(client_id: str, code: Optional[str] = None,
     """按股票分组汇总交易流水统计：买卖量额、累计已实现盈亏、手续费分类总计。"""
     client = client_service.get_visible_client(db, user, client_id)
     return cost_basis_service.summarize_transactions(db, client, code=code)
+
+
+# ========== 审计日志列表（后台「查看日志」Tab，管理员专用） ==========
+ACTION_FILTER_HINT = (
+    "支持过滤：action 完整值（如 user.create / client.update / login_success / adjust 等）。"
+)
+
+
+@router.get("/audit-logs", response_model=AuditLogPage)
+def list_audit_logs(
+    page: int = 1,
+    page_size: int = 50,
+    keyword: Optional[str] = None,      # 通配：actor_name / note / target_id / target_type
+    action: Optional[str] = None,       # 精确 action 过滤
+    target_type: Optional[str] = None,  # 精确 target_type 过滤 (user / client / tx)
+    actor_id: Optional[str] = None,     # 精确操作人 ID
+    start: Optional[dt.datetime] = None,   # 开始时间（>=）
+    end: Optional[dt.datetime] = None,     # 结束时间（<=）
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(ROLE_ADMIN)),
+):
+    """管理员「查看日志」查询：按时间倒序分页返回完整 audit_logs。"""
+    page = max(1, page)
+    page_size = max(1, min(500, page_size))
+    q = db.query(AuditLog)
+    if keyword:
+        like = f"%{keyword}%"
+        q = q.filter(or_(
+            AuditLog.actor_name.ilike(like),
+            AuditLog.note.ilike(like),
+            AuditLog.target_id.ilike(like),
+            func.coalesce(AuditLog.target_type, "").ilike(like),
+            AuditLog.action.ilike(like),
+            func.coalesce(AuditLog.ip_address, "").ilike(like),
+        ))
+    if action:
+        q = q.filter(AuditLog.action == action)
+    if target_type:
+        q = q.filter(AuditLog.target_type == target_type)
+    if actor_id:
+        q = q.filter(AuditLog.actor_user_id == actor_id)
+    if start:
+        q = q.filter(AuditLog.created_at >= start)
+    if end:
+        q = q.filter(AuditLog.created_at <= end)
+    total = q.count()
+    items = (q.order_by(AuditLog.id.desc())
+             .offset((page - 1) * page_size)
+             .limit(page_size)
+             .all())
+    return {"total": total, "items": items}

@@ -190,6 +190,16 @@ def _migrate_sqlite_columns():
         ("transactions", "fee_commission", "FLOAT NOT NULL DEFAULT 0.0"),
         ("transactions", "fee_stamp_tax", "FLOAT NOT NULL DEFAULT 0.0"),
         ("transactions", "fee_transfer_fee", "FLOAT NOT NULL DEFAULT 0.0"),
+        # 调仓前后成本价（v0.1.3 策略复盘括号内 Δ 值所需）
+        ("transactions", "prev_cost_price", "FLOAT"),
+        # 调仓审计尾链（nullable FK，允许系统/种子/公司行动无操作人场景为空）
+        ("transactions", "audit_log_id", "INTEGER"),
+        # 账号级活动溯源 IP + UA：复用 audit_logs 扩列，不新建独立 account_activity_logs 表
+        ("audit_logs", "ip_address", "VARCHAR(45)"),
+        ("audit_logs", "user_agent", "TEXT"),
+        # 账户生命周期（v0.1.5）：非 admin 默认 DEFAULT_LICENSE_DAYS，到期自动变 expired 禁止登录
+        ("users", "status", "VARCHAR(16) NOT NULL DEFAULT 'active'"),
+        ("users", "expires_at", "DATETIME"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -204,6 +214,87 @@ def _migrate_sqlite_columns():
                     f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
                 conn.commit()
                 logger.info("已迁移：%s 表新增 %s 列", table, column)
+
+        # -----------------------------------------------------------
+        # SQLite 不支持 ALTER COLUMN；clients.advisor_id 早期是 NOT NULL，
+        # 现在要放开为"未分配投顾也允许开户（owner_client 自己管持仓）"，
+        # 因此对老库重建 clients.advisor_id 的 NOT NULL 约束。
+        # -----------------------------------------------------------
+        advisor_cols = [dict(zip(("cid","name","type","notnull","dflt","pk"), row))
+                        for row in conn.execute(text("PRAGMA table_info(clients)"))]
+        advisor_row = next((r for r in advisor_cols if r["name"] == "advisor_id"), None)
+        if advisor_row and int(advisor_row.get("notnull") or 0) == 1:
+            logger.info("SQLite 重建 clients 表：放松 advisor_id NOT NULL 为可空")
+            # 收集所有列名（用于 INSERT 回写时列顺序一致）
+            col_names = [r["name"] for r in advisor_cols]
+            col_specs = []
+            fk_clauses = []
+            for r in advisor_cols:
+                c = f'"{r["name"]}" {r["type"]}'
+                if r["name"] == "advisor_id":
+                    # 新定义：去掉 NOT NULL
+                    pass
+                elif int(r.get("notnull") or 0) == 1:
+                    dflt = r.get("dflt")
+                    if dflt is not None:
+                        c += f" NOT NULL DEFAULT {dflt}"
+                    else:
+                        c += " NOT NULL"
+                else:
+                    dflt = r.get("dflt")
+                    if dflt is not None:
+                        c += f" DEFAULT {dflt}"
+                if int(r.get("pk") or 0) == 1:
+                    c += " PRIMARY KEY"
+                col_specs.append(c)
+            # FK：advisor_id / owner_user_id 参考 PRAGMA foreign_key_list
+            fks = list(conn.execute(text("PRAGMA foreign_key_list(clients)")))
+            for fk in fks:
+                fk_clauses.append(f'FOREIGN KEY ("{fk[3]}") REFERENCES "{fk[2]}"("{fk[4]}") ON DELETE NO ACTION')
+            # 索引：重建 ix_clients_advisor_id / owner_user_id；
+            # PRAGMA index_list 返回列 (seq, name, unique, origin, partial)，
+            # 其中 unique 是 int（0/1），之前用 row[2].startswith("sqlite_") 会 AttributeError。
+            existing_indexes = [
+                row[1] for row in conn.execute(text("PRAGMA index_list(clients)"))
+                if isinstance(row[1], str) and not row[1].startswith("sqlite_autoindex_")
+            ]
+            new_table_ddl = (
+                "CREATE TABLE clients_new (\n  "
+                + ",\n  ".join(col_specs + fk_clauses)
+                + "\n)"
+            )
+            conn.execute(text(new_table_ddl))
+            col_list = ", ".join(f'"{n}"' for n in col_names)
+            conn.execute(text(f"INSERT INTO clients_new ({col_list}) SELECT {col_list} FROM clients"))
+            conn.execute(text("DROP TABLE clients"))
+            conn.execute(text("ALTER TABLE clients_new RENAME TO clients"))
+            # 重建原来就存在的非 autoindex 索引（忽略重复，用 CREATE IF NOT EXISTS 包一层）
+            for idx_name in existing_indexes:
+                # SQLite 没有 CREATE INDEX IF NOT EXISTS LIKE 语法，
+                # 我们关心的两个业务索引在下面强制 IF NOT EXISTS 重建即可，
+                # 其他遗留同名索引靠"无脑 IF NOT EXISTS"兜底避免冲突。
+                pass
+            # 直接按已知索引名重建（CREATE INDEX IF NOT EXISTS 幂等）
+            for idx_ddl in [
+                "CREATE INDEX IF NOT EXISTS ix_clients_advisor_id ON clients(advisor_id)",
+                "CREATE INDEX IF NOT EXISTS ix_clients_owner_user_id ON clients(owner_user_id)",
+            ]:
+                conn.execute(text(idx_ddl))
+            conn.commit()
+            logger.info("已重建 clients.advisor_id：允许为 NULL（保留原非 autoindex 索引 %s）",
+                        existing_indexes)
+
+        # -----------------------------------------------------------
+        # 补充索引：ALTER TABLE ADD 列后 SQLite 不会自动建 models.index=True 的索引
+        # -----------------------------------------------------------
+        index_ddls = [
+            "CREATE INDEX IF NOT EXISTS ix_transactions_audit_log_id ON transactions(audit_log_id)",
+            "CREATE INDEX IF NOT EXISTS ix_audit_logs_ip_address ON audit_logs(ip_address)",
+        ]
+        for ddl in index_ddls:
+            conn.execute(text(ddl))
+            conn.commit()
+        logger.info("审计尾链/账号活动索引已确保存在（%d 条）", len(index_ddls))
 
 
 @asynccontextmanager

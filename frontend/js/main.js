@@ -28,18 +28,23 @@ import {
 } from './components/profileOperations.js';
 import {
     initAuth, handleLogin, handleLogout, toggleNotificationPanel,
-    openNotification, markAllRead,
+    openNotification, markAllRead, handleDeleteSelfAccount,
 } from './components/auth.js';
 import {
     openAdminPanel, closeAdminPanel, switchAdminTab, refreshAdminPanel,
     renderRelationList, openRelationModal, closeRelationModal, saveRelation,
     removeClientRelation, exportRelationsFile, handleRelationImportFile,
-    toggleAccountSubrole, submitAccountForm, copyText as copyTextAdmin,
+    toggleAccountSubrole, toggleAccountClientFields, submitAccountForm, copyText as copyTextAdmin,
+    renderAccountMgmtList, renderAccountMgmtTab, adminAccDelete, adminAccResetPwd, submitAccResetPwd,
+    adminAccLifecycle, submitAccRenew, submitAccLifecyclePatch,
+    adminAccRelation, submitAccRelation,
+    auditLogsSearch, auditLogsReset,
 } from './components/admin.js';
 import {
     openOnboarding, closeOnboarding, onboardingNext, onboardingBack,
     submitOnboarding,
 } from './components/onboarding.js';
+import { toggleStrategyTimeline } from './components/strategy.js';
 
 // ---- 暴露给内联 onclick 使用（ES module 作用域隔离）----
 Object.assign(window, {
@@ -55,12 +60,18 @@ Object.assign(window, {
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, deletePosition,
     handleLogin, handleLogout, toggleNotificationPanel, openNotification, markAllRead,
+    handleDeleteSelfAccount,
     openAdminPanel, closeAdminPanel, switchAdminTab, refreshAdminPanel,
     renderRelationList, openRelationModal, closeRelationModal, saveRelation,
     removeClientRelation, exportRelationsFile, handleRelationImportFile,
-    toggleAccountSubrole, submitAccountForm,
+    toggleAccountSubrole, toggleAccountClientFields, submitAccountForm,
+    renderAccountMgmtList, renderAccountMgmtTab, adminAccDelete, adminAccResetPwd, submitAccResetPwd,
+    adminAccLifecycle, submitAccRenew, submitAccLifecyclePatch,
+    adminAccRelation, submitAccRelation,
+    auditLogsSearch, auditLogsReset,
     openOnboarding, closeOnboarding, onboardingNext, onboardingBack, submitOnboarding,
     copyText: copyTextAdmin,
+    toggleStrategyTimeline,
 });
 
 // --- 顶部导航高亮：点击 + 滚动联动 ---

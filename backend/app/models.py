@@ -32,8 +32,18 @@ ROLE_ADMIN = "admin"
 SUBROLE_CLIENT = "client"
 SUBROLE_NON_CLIENT = "non_client"
 
+# 账户生命周期状态（取代粗暴删人：expired 只是"到期了不能登录"，可续费恢复）
+USER_STATUS_ACTIVE = "active"
+USER_STATUS_EXPIRED = "expired"
+USER_STATUS_DELETED = "deleted"
+USER_STATUSES = (USER_STATUS_ACTIVE, USER_STATUS_EXPIRED, USER_STATUS_DELETED)
+
 ROLES = (ROLE_GUEST, ROLE_USER, ROLE_ADVISOR, ROLE_SERVICE, ROLE_ADMIN)
 ROLE_LEVEL = {ROLE_GUEST: 0, ROLE_USER: 1, ROLE_ADVISOR: 2, ROLE_SERVICE: 3, ROLE_ADMIN: 4}
+# 非 admin 角色才受生命周期管理：admin 默认永不过期
+NON_ADMIN_ROLES = (ROLE_USER, ROLE_ADVISOR, ROLE_SERVICE)
+# 新建非 admin 账户默认赠送天数（可由创建账户时传 license_days 覆盖）
+DEFAULT_LICENSE_DAYS = 30
 
 # 风险预警状态
 ALERT_OPEN = "open"
@@ -44,6 +54,7 @@ ALERT_RESOLVED = "resolved"
 NOTIF_RISK = "risk_alert"
 NOTIF_INFO = "info"
 NOTIF_SYSTEM = "system"
+NOTIF_ACCOUNT_CREDENTIALS = "account_credentials"   # 客服开户创建的 user-client 账密 → 站内信给管理员
 
 
 def utcnow():
@@ -56,11 +67,14 @@ class User(Base):
     id = Column(String(64), primary_key=True)
     username = Column(String(64), unique=True, nullable=False, index=True)
     password_hash = Column(String(256), nullable=False)
-    role = Column(String(16), nullable=False, default=ROLE_GUEST)
+    role = Column(String(16), nullable=False)
     sub_role = Column(String(16), nullable=True)  # client / non_client（仅 user 角色）
     name = Column(String(64), nullable=False)
     email = Column(String(128), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
+    # 生命周期（非 admin 才启用，admin 两字段都为 None → 永久）
+    status = Column(String(16), nullable=False, default=USER_STATUS_ACTIVE, index=True)
+    expires_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
     # 顾问：所服务的客户（通过 Client.advisor_id 反向）
@@ -84,7 +98,7 @@ class Client(Base):
     note = Column(Text, default="")
     available_cash = Column(Float, default=0.0)
 
-    advisor_id = Column(String(64), ForeignKey("users.id"), nullable=False, index=True)
+    advisor_id = Column(String(64), ForeignKey("users.id"), nullable=True, index=True)
     # 归属用户账号（user 角色「客户/非客户」子角色管理自有持仓时关联）
     owner_user_id = Column(String(64), ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
@@ -315,7 +329,8 @@ class Transaction(Base):
     action = Column(String(8), nullable=False)  # 'buy' / 'sell'
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=False)
-    cost_price = Column(Float, nullable=True)  # 交易时的成本价（加权平均口径）
+    cost_price = Column(Float, nullable=True)  # 交易完成后的最新持仓成本价（移动加权口径）
+    prev_cost_price = Column(Float, nullable=True)  # 交易发生前的持仓成本价；仅加仓时与 cost_price 不同（新仓/清仓=None，减仓与 cost_price 相等）
     fee_mode = Column(String(8), nullable=True)     # 'rate' / 'fixed' / None(全局默认)
     fee_value = Column(Float, nullable=True)        # 费率值或固定金额
     fee_amount = Column(Float, nullable=False, default=0.0)  # 本笔实际手续费合计（元）
@@ -325,6 +340,10 @@ class Transaction(Base):
     realized_pnl = Column(Float, nullable=False, default=0.0)  # 已实现盈亏（卖出时，已扣手续费）
     trade_date = Column(String(10), nullable=False, index=True)
     executed_at = Column(DateTime, nullable=True, index=True)  # 完整执行时间戳（同秒内按 id 保证稳定排序）
+    audit_log_id = Column(Integer,
+                          ForeignKey("audit_logs.id", ondelete="SET NULL"),
+                          nullable=True, index=True,
+                          comment="关联的操作审计日志（人工调仓必填，种子/系统/公司行动可为空）")
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
@@ -359,17 +378,23 @@ class CostBasisLot(Base):
 
 
 class AuditLog(Base):
-    """操作审计日志：记录所有客户信息 / 关系 / 权限的修改操作，
-    包括操作人、操作时间、修改前后的字段级对比。"""
+    """操作审计日志：记录所有
+        - 客户信息/关系/持仓修改（target_type='client'）
+        - 调仓交易尾链（target_type='transaction'，transaction.audit_log_id FK）
+        - 用户账号活动（创建/删除/修改角色/登录/改密，target_type='user'）
+    包括操作人、操作时间、修改前后的字段级对比，以及 IP/UA（登录事件溯源用）。"""
     __tablename__ = "audit_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     # 操作人（users.id），可能为空（系统级操作）
     actor_user_id = Column(String(64), ForeignKey("users.id"), nullable=True, index=True)
     actor_name = Column(String(64), nullable=True)  # 冗余快照，防止用户被删除后丢失
-    # 操作类别：client.update / client.relations / client.positions / client.delete / user.password
+    # 操作类别：
+    #   client: client.update / client.relations / client.positions / client.delete
+    #   transaction: transaction.create（人工调仓）
+    #   user: user.create / user.update / user.delete / user.login_success / user.login_failed / user.password_change
     action = Column(String(32), nullable=False, index=True)
-    # 目标对象：client / user 等
+    # 目标对象：client / transaction / user 等
     target_type = Column(String(16), nullable=False, index=True)
     target_id = Column(String(64), nullable=False, index=True)
     # 修改前快照 / 修改后快照（JSON），按 action 决定包含的字段
@@ -377,5 +402,9 @@ class AuditLog(Base):
     after_value = Column(JSON, nullable=True)
     # 字段级 diff：{ field: { before, after } }，只记录发生变化的字段
     diff = Column(JSON, nullable=True)
+    # 账号级活动的溯源信息（用于登录事件定位异常 IP）；非登录事件通常为 None
+    ip_address = Column(String(45), nullable=True, index=True,
+                        comment="操作来源 IPv4/IPv6（最长 45 = IPv4-mapped-IPv6 长度）")
+    user_agent = Column(Text, nullable=True, comment="登录事件的浏览器 UA 快照；非登录通常为空")
     note = Column(String(256), nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False, index=True)

@@ -154,7 +154,10 @@ function renderRelations(body) {
     const { advisors, services } = wizOptions;
     const user = getUser();
     const isSv = isService();
-    const advisorOptions = advisors.map(a => `<option value="${a.id}" ${wizData.advisorId === a.id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`).join('');
+    const advisorOptions = [
+        `<option value="">(不分配 — 由客户本人管理持仓)</option>`,
+        ...advisors.map(a => `<option value="${a.id}" ${wizData.advisorId === a.id ? 'selected' : ''}>${escapeHtml(a.name)}</option>`),
+    ].join('');
 
     let serviceField;
     if (isSv) {
@@ -170,7 +173,7 @@ function renderRelations(body) {
             </div>`;
     } else {
         serviceField = `
-            <p class="text-xs text-muted mb-2">选择 1~2 名客服</p>
+            <p class="text-xs text-muted mb-2">最多选 2 名客服（可留空）</p>
             <div class="grid grid-cols-2 gap-2">
                 ${services.map(s => `<label class="flex items-center gap-2 text-sm text-body"><input type="checkbox" class="ob-svc" value="${s.id}" ${wizData.serviceIds.includes(s.id) ? 'checked' : ''}> ${escapeHtml(s.name)}</label>`).join('')}
             </div>`;
@@ -234,10 +237,9 @@ export function onboardingNext() {
         wizData.note = document.getElementById('obNote')?.value.trim() || '';
     }
     if (wizStep === 1) {
-        const advisorId = document.getElementById('obAdvisor')?.value;
+        const advisorId = document.getElementById('obAdvisor')?.value || '';
         const serviceIds = getSelectedServicesFromDom();
-        if (!advisorId) { showToast('❌ 请选择投资顾问', 'error'); return; }
-        if (serviceIds.length < 1 || serviceIds.length > 2) { showToast('❌ 请选择 1~2 名客服', 'error'); return; }
+        if (serviceIds.length > 2) { showToast('❌ 客服最多可选 2 名', 'error'); return; }
         wizData.advisorId = advisorId;
         wizData.serviceIds = serviceIds;
     }
@@ -257,13 +259,12 @@ export async function submitOnboarding() {
     const riskLevel = wizData.risk || null;
     const cash = parseFloat(wizData.cash || '0');
     const note = wizData.note || '';
-    const advisorId = wizData.advisorId;
+    const advisorId = wizData.advisorId || null;
     const serviceIds = wizData.serviceIds || [];
     const createLogin = document.getElementById('obCreateLogin')?.checked;
 
     if (!name) { showToast('❌ 请输入客户姓名', 'error'); return; }
-    if (!advisorId) { showToast('❌ 请选择投资顾问', 'error'); return; }
-    if (serviceIds.length < 1 || serviceIds.length > 2) { showToast('❌ 请选择 1~2 名客服', 'error'); return; }
+    if (serviceIds.length > 2) { showToast('❌ 客服最多可选 2 名', 'error'); return; }
 
     const payload = {
         name,
@@ -283,6 +284,9 @@ export async function submitOnboarding() {
         const result = await createClient(payload);
         const login = result.login;
         const body = document.getElementById('onboardingBody');
+        // 判断是否已通过管理员站内信分发凭证
+        const deliveredToAdmin = login && login.redelivered_via_admin_inbox === true;
+        const hasPlainPassword = login && typeof login.initial_password === 'string' && login.initial_password.length > 0;
         body.innerHTML = `
             <div class="text-center py-4">
                 <div class="w-14 h-14 mx-auto mb-3 rounded-full bg-positive/10 text-positive flex items-center justify-center">
@@ -291,14 +295,20 @@ export async function submitOnboarding() {
                 <h3 class="text-lg font-semibold text-ink">创建成功</h3>
                 <p class="text-sm text-muted mt-1">客户编号 <span class="font-mono text-ink">${escapeHtml(result.id)}</span></p>
                 ${login ? `
-                <div class="mt-4 text-left rounded-xl bg-primary/5 border border-primary/15 p-4 text-sm">
+                <div class="mt-4 text-left rounded-xl ${deliveredToAdmin ? 'bg-surface-strong border border-hairline' : 'bg-primary/5 border border-primary/15'} p-4 text-sm">
                     <div class="font-medium text-ink mb-2">登录账号已创建</div>
                     <div class="space-y-1 text-body">
                         <div>用户名：<span class="font-mono text-ink">${escapeHtml(login.username)}</span></div>
+                        ${hasPlainPassword ? `
                         <div>初始密码：<span class="font-mono text-ink">${escapeHtml(login.initial_password)}</span>
-                            <button onclick="copyText('${escapeHtml(login.initial_password)}')" class="ml-2 text-xs text-primary hover:underline">复制</button></div>
+                            <button onclick="copyText('${escapeHtml(login.initial_password)}')" class="ml-2 text-xs text-primary hover:underline">复制</button></div>` : `
+                        <div class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2 mt-2 text-xs leading-relaxed">
+                            <div class="font-medium text-warning mb-1">🔒 凭证已走管理员站内信分发</div>
+                            <div class="text-body">出于账号安全，本次创建的「初始密码」不再直接返回给客服界面。</div>
+                            <div class="text-body mt-1">请联系管理员在顶部“🔔 站内信”中查看本次账户凭证，并将用户名与初始密码安全地转交客户本人。</div>
+                        </div>`}
                     </div>
-                    <p class="text-xs text-muted mt-2">请将用户名与初始密码安全转交给客户，客户登录后请提醒及时修改密码。</p>
+                    ${hasPlainPassword ? `<p class="text-xs text-muted mt-2">请将用户名与初始密码安全转交给客户，客户登录后请提醒及时修改密码。</p>` : ''}
                 </div>` : ''}
                 <p class="text-sm text-muted mt-4">后续操作：可在「客户持仓工作台」查看该客户，并为其录入持仓与跟进风险预警。</p>
             </div>`;

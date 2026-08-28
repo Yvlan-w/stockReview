@@ -1,6 +1,6 @@
 """Pydantic 请求/响应模型（API 字段级契约）。"""
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -19,6 +19,10 @@ class UserOut(BaseModel):
     name: str
     email: Optional[str] = None
     is_active: bool = True
+    status: str = "active"           # active/expired/deleted（生命周期标记；过期后不能登录）
+    expires_at: Optional[datetime] = None   # 非 admin 才会有；到期自动变 expired；admin 永不过期=空
+    remaining_days: Optional[int] = None    # 前端直接展示：admin=None/过期后=负数/未过期=整数
+    client_id: Optional[str] = None         # 当 role=user 且 sub_role=client 时，通过 owner_user_id 反查的客户档案编号
 
 
 class TokenOut(BaseModel):
@@ -34,15 +38,53 @@ class UserCreate(BaseModel):
     sub_role: Optional[str] = None
     name: str = Field(..., min_length=1, max_length=64)
     email: Optional[str] = None
+    # 账户生命周期：非 admin 才受管；None 表示走默认 DEFAULT_LICENSE_DAYS；admin 创建时忽略
+    license_days: Optional[int] = Field(None, ge=1, le=36500)
+    # 仅当创建 role=user & sub_role=client 时使用：同步创建对应 Client 档案所需字段
+    # （advisor 是实际分配的投资顾问；service_ids 是分配的 1~2 名客服；都缺省时兜底为 creator 自己。）
+    client_advisor_id: Optional[str] = None
+    client_service_ids: List[str] = []
+    client_risk_level: Optional[str] = None
+    client_available_cash: float = 0.0
 
 
 class UserCreateOut(UserOut):
     initial_password: Optional[str] = None   # 自动生成时返回初始密码（明文，仅一次）
+    client_id: Optional[str] = None           # role=user/sub_role=client 时同步创建的客户编号
+    # 当创建者角色无权直接看到初始密码（如客服）时，会置 True 告知前端：
+    # 初始密码已以站内信形式单独发送给管理员，请不要在当前界面显示明文。
+    redelivered_via_admin_inbox: Optional[bool] = None
 
 
 class PasswordChange(BaseModel):
     old_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=1, max_length=128)
+
+
+class UserRenew(BaseModel):
+    """管理员续费 / 充值天数。extend_days 为正则为续期；为负视为提前缩短。"""
+    extend_days: int = Field(..., ge=-36500, le=36500)
+
+
+class UserResetPassword(BaseModel):
+    """管理员重置密码；password 可空则自动生成，响应里返回新密码明文一次。"""
+    password: Optional[str] = Field(None, min_length=1, max_length=128)
+
+
+class UserStatusPatch(BaseModel):
+    """分配关系+生命周期管理界面里的动作。"""
+    status: Optional[str] = None   # active/expired/deleted（deleted=软删，前端再无列表）
+    expires_at: Optional[datetime] = None
+    license_days: Optional[int] = Field(None, ge=1, le=36500)  # 相对于今天起的新赠送，到期日直接覆盖
+
+
+class UserUpdate(BaseModel):
+    """管理员更新用户资料（不包含密码；改密见 PasswordChange）。"""
+    name: Optional[str] = Field(None, min_length=1, max_length=64)
+    email: Optional[str] = None
+    role: Optional[str] = None
+    sub_role: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 # ---- 持仓 ----
@@ -76,7 +118,7 @@ class ClientCreate(BaseModel):
     tags: List[str] = []
     note: str = ""
     available_cash: float = 0.0
-    advisor_id: str
+    advisor_id: Optional[str] = None  # 可空：由 owner_user_id 账号本人自管持仓
     service_ids: List[str] = []
     owner_user_id: Optional[str] = None
     positions: List[PositionIn] = []
@@ -101,7 +143,7 @@ class ClientUpdate(BaseModel):
 
 
 class RelationsUpdate(BaseModel):
-    advisor_id: str
+    advisor_id: Optional[str] = None  # 可空：不分配投顾，由 owner 本人自管
     service_ids: List[str] = []
 
 
@@ -118,7 +160,7 @@ class ClientOut(BaseModel):
     tags: List[str] = []
     note: str = ""
     available_cash: float = 0.0
-    advisor_id: str
+    advisor_id: Optional[str] = None
     advisor_name: Optional[str] = None
     service_ids: List[str] = []
     service_names: List[str] = []
@@ -172,14 +214,14 @@ class UserOptionsOut(BaseModel):
 class RelationImportRow(BaseModel):
     client_id: Optional[str] = None   # 为空则自动生成客户编号
     name: str = Field(..., min_length=1, max_length=64)
-    advisor_id: str
+    advisor_id: Optional[str] = None  # 可空：不分配投顾，由 owner 本人自管
     service_ids: List[str] = []
 
 
 class RelationExportRow(BaseModel):
     client_id: str
     name: str
-    advisor_id: str
+    advisor_id: Optional[str] = None
     advisor_name: Optional[str] = None
     service_ids: List[str] = []
 
@@ -293,7 +335,8 @@ class TransactionOut(BaseModel):
     action: str
     quantity: int
     price: float
-    cost_price: Optional[float] = None
+    cost_price: Optional[float] = None  # 交易完成后的最新持仓成本价（移动加权口径）
+    prev_cost_price: Optional[float] = None  # 交易发生前的持仓成本价（仅加仓≠cost_price）
     fee_mode: Optional[str] = None
     fee_value: Optional[float] = None
     fee_amount: float
@@ -303,6 +346,7 @@ class TransactionOut(BaseModel):
     realized_pnl: float
     trade_date: str
     executed_at: Optional[datetime] = None
+    audit_log_id: Optional[int] = None  # 关联的审计日志（人工调仓会有，种子/系统操作可能为空）
     created_at: datetime
 
 
@@ -317,6 +361,7 @@ class AdjustRequest(BaseModel):
     fee_mode: Optional[str] = Field(None, pattern="^(rate|fixed)$")
     fee_value: Optional[float] = None
     trade_date: Optional[str] = None
+    executed_at: Optional[datetime] = None  # 人为指定交易时间；不传则用服务器当前时间
     from_cash: bool = True
     cost_method: str = Field("average", pattern="^(average|fifo|lifo)$")
 
@@ -332,3 +377,26 @@ class AdjustRequest(BaseModel):
             if self.fee_mode == "fixed" and not (0 < self.fee_value <= 100000):
                 raise ValueError("固定手续费需在 (0, 100000] 元之间")
         return self
+
+
+# ---- 审计日志（后台「查看日志」Tab） ----
+class AuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+    actor_user_id: Optional[str] = None
+    actor_name: Optional[str] = None
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    before_value: Any = None
+    after_value: Any = None
+    diff: Any = None
+    note: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+class AuditLogPage(BaseModel):
+    total: int
+    items: List[AuditLogOut]

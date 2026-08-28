@@ -6,6 +6,7 @@ import { formatCurrency, formatNumber, getPnLColor, getSectorBadgeClass, getSect
 import { marketDataState } from '../services/marketService.js';
 import { canEditClient } from '../permissions/access.js';
 import { getPrice, getPriceMap, updatePriceCache } from '../services/priceService.js';
+import { renderStrategySection } from './strategy.js';
 
 let currentFilter = 'all';
 let sortDirection = {};
@@ -614,11 +615,17 @@ export function renderVolumeChart() {
 }
 
 // --- 数据变更后刷新总览组件 ---
-export function refreshAll(portfolio, pnlHistory) {
+export async function refreshAll(portfolio, pnlHistory) {
     currentPortfolio = portfolio;
     renderStatsCards(portfolio);
     renderPositionsTable(currentFilter, portfolio);
     renderCharts(pnlHistory, portfolio);
+    // 持仓变化后同步刷新策略复盘（依赖最新交易流水）
+    try {
+        await renderStrategySection();
+    } catch (e) {
+        console.warn('策略复盘刷新失败:', e);
+    }
 }
 
 // --- 实时刷新（不重绘图表）：调仓/新建持仓成功后即时反映最新持仓与估值 ---

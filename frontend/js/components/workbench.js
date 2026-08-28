@@ -13,6 +13,13 @@ import { RISK_BADGE, ALL_MANAGED_TAGS } from '../core/config.js';
 import { showToast } from '../core/ui.js';
 import { marketDataState } from '../services/marketService.js';
 import { updatePriceCache, getPrice } from '../services/priceService.js';
+
+
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+}
 import { renderStatsCards, renderPositionsTable, renderCharts, renderSectorConcentration } from './overview.js';
 import { renderStrategySection } from './strategy.js';
 import { canEditClient, canHandleAlerts, canCreateClient } from '../permissions/access.js';
@@ -161,7 +168,7 @@ export async function refreshClientDetail() {
     renderPositionsTable('all', portfolioData);
     renderCharts(pnlHistoryData);
     renderSectorConcentration();
-    renderStrategySection();
+    await renderStrategySection();
     const cnt = document.getElementById('positionCount');
     if (cnt) {
         const positions = portfolioData?.positions || getUserPositions();
@@ -211,16 +218,20 @@ export function renderClientProfile() {
                     </div>
                 </div>
             </div>
-            <div class="flex items-center gap-5 flex-wrap">
-                <div class="text-right">
-                    <div class="text-xs text-muted">总资产</div>
-                    <div class="font-mono text-2xl font-semibold text-ink">${fmtMoney(s.totalAssets)}</div>
+            <div class="ml-auto w-full sm:w-auto flex flex-col items-stretch sm:items-end gap-3">
+                <!-- 第一行：总资产 + 持仓盈亏 卡片 -->
+                <div class="flex items-center gap-5 justify-end flex-wrap">
+                    <div class="text-right">
+                        <div class="text-xs text-muted">总资产</div>
+                        <div class="font-mono text-2xl font-semibold text-ink">${fmtMoney(s.totalAssets)}</div>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-xs text-muted">持仓盈亏</div>
+                        <div class="font-mono text-2xl font-semibold ${pnlColor}">${s.totalPnl >= 0 ? '+' : ''}${fmtMoney(s.totalPnl)} <span class="text-sm">(${s.totalPnlPct >= 0 ? '+' : ''}${s.totalPnlPct.toFixed(1)}%)</span></div>
+                    </div>
                 </div>
-                <div class="text-right">
-                    <div class="text-xs text-muted">持仓盈亏</div>
-                    <div class="font-mono text-2xl font-semibold ${pnlColor}">${s.totalPnl >= 0 ? '+' : ''}${fmtMoney(s.totalPnl)} <span class="text-sm">(${s.totalPnlPct >= 0 ? '+' : ''}${s.totalPnlPct.toFixed(1)}%)</span></div>
-                </div>
-                <div class="flex items-center gap-2 flex-wrap">
+                <!-- 第二行：编辑客户 + 导出客户报告 按钮（右对齐） -->
+                <div class="flex items-center gap-2 justify-end flex-wrap">
                     ${canManage ? `<button onclick="openClientEditModal()" class="btn-secondary flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold rounded-pill border border-hairline bg-surface-strong hover:bg-hairline transition-colors">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
                         编辑客户
@@ -515,15 +526,20 @@ export async function updateClientNote(val) {
 // 打开弹窗时从当前客户 tags 初始化，保存时再回写
 let freeTagSnapshot = [];
 
-// ---- 标签编辑器弹窗（受控分类标签 + 自由标签双轨编辑）----
+// ---- 标签编辑器弹窗（受控分类标签 + 自定义标签双轨编辑）----
 export function openTagEditorModal() {
     if (!guardEdit()) return;
     const c = getCurrentClient();
     if (!c) return;
     const tags = c.tags || [];
-    // 拆分：受控标签 → tagSelector 状态；自由标签 → 本地数组
+    // 拆分：受控标签 → tagSelector 状态；自定义标签 → 本地数组
     initTagSelector(tags);
     freeTagSnapshot = tags.filter(t => !ALL_MANAGED_TAGS.includes(t));
+    // 设置弹窗副标题：name (id)
+    const titleEl = document.getElementById('tagEditorTitle');
+    const subEl = document.getElementById('tagEditorSubtitle');
+    if (titleEl) titleEl.textContent = '编辑客户标签';
+    if (subEl) subEl.textContent = `${c.name || '—'}（${c.id || '—'}）`;
     renderTagSelector();
     renderFreeTagsList();
     document.getElementById('freeTagInput').value = '';
@@ -540,12 +556,20 @@ function renderFreeTagsList() {
     const el = document.getElementById('freeTagsList');
     if (!el) return;
     if (!freeTagSnapshot.length) {
-        el.innerHTML = '<span class="text-xs text-muted">暂无自由标签，可在下方输入并添加</span>';
+        el.innerHTML = '<div class="text-xs text-muted py-1">暂无自定义标签</div>';
         return;
     }
-    el.innerHTML = freeTagSnapshot.map(t =>
-        `<span class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full bg-primary/10 text-primary">${t}<button onclick="removeFreeTagInEditor('${t}')" class="hover:text-down transition-colors">×</button></span>`
-    ).join('');
+    el.innerHTML = freeTagSnapshot.map(t => {
+        const safe = String(t).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        return `<span class="inline-flex items-center gap-1.5 pl-3 pr-1.5 py-1 text-xs font-medium rounded-full bg-primary/10 text-primary border border-primary/20">
+            <span>${escapeHtml(t)}</span>
+            <button onclick="removeFreeTagInEditor('${safe}')"
+                class="w-4 h-4 rounded-full flex items-center justify-center hover:bg-primary/20 transition-colors"
+                title="移除标签「${escapeHtml(t)}」">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </span>`;
+    }).join('');
 }
 
 export function addFreeTag() {

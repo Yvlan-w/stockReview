@@ -28,11 +28,9 @@ def _get_role_user(db: Session, user_id: str, role: str) -> User:
     return user
 
 
-def validate_relations(db: Session, advisor_id: str, service_ids: list[str]):
-    """校验客户-顾问-客服关系：顾问须为 advisor 角色，客服须为 service 角色，且 1~2 名。"""
-    advisor = _get_role_user(db, advisor_id, ROLE_ADVISOR)
-    if not service_ids:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "每个客户至少需分配 1 名客服")
+def validate_relations(db: Session, advisor_id: str | None, service_ids: list[str]):
+    """校验客户-顾问-客服关系；未分配时允许传空（由自己的 owner 账号管理持仓）。"""
+    advisor = _get_role_user(db, advisor_id, ROLE_ADVISOR) if advisor_id else None
     if len(service_ids) > MAX_SERVICES_PER_CLIENT:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -55,12 +53,21 @@ def _next_client_id(db: Session) -> str:
         count += 1
 
 
-def create_client(db: Session, data: ClientCreate, creator: User | None = None) -> tuple[Client, dict | None]:
+def create_client(db: Session, data: ClientCreate, creator: User | None = None, *,
+                  ip_address: str | None = None,
+                  request_user_agent: str | None = None,
+                  ) -> tuple[Client, dict | None]:
     """创建客户；客服创建时固定将本人加入客服名单。返回 (客户, 登录账号信息)。
 
     create_login=True 时同时创建 user-client 登录账号并回填 owner_user_id，
     登录账号信息（含一次性初始密码）通过第二个返回值回传给调用方。
+
+    会写入两条审计日志（若开启 best-effort 降级则不抛异常）：
+      - client.create：客户档案本身
+      - user.create：同时创建登录账号时（=create_login=True）
     """
+    from .audit_service import log_user_activity
+
     service_ids = list(data.service_ids or [])
     if creator is not None and creator.role == ROLE_SERVICE and creator.id not in service_ids:
         service_ids.insert(0, creator.id)
@@ -72,21 +79,28 @@ def create_client(db: Session, data: ClientCreate, creator: User | None = None) 
 
     login = None
     owner_user_id = data.owner_user_id
+    created_user_obj = None
     if data.create_login:
-        user, initial_password = auth_service.create_user(
+        created_user_obj, initial_password = auth_service.create_user(
             db, UserCreate(role=ROLE_USER, sub_role=SUBROLE_CLIENT, name=data.name)
         )
-        owner_user_id = user.id
+        owner_user_id = created_user_obj.id
         login = {
-            "id": user.id, "username": user.username, "role": user.role,
-            "sub_role": user.sub_role, "name": user.name, "email": user.email,
-            "is_active": user.is_active, "initial_password": initial_password,
+            "id": created_user_obj.id,
+            "username": created_user_obj.username,
+            "role": created_user_obj.role,
+            "sub_role": created_user_obj.sub_role,
+            "name": created_user_obj.name,
+            "email": created_user_obj.email,
+            "is_active": created_user_obj.is_active,
+            "initial_password": initial_password,
         }
 
     client = Client(
         id=client_id, name=data.name, age=data.age, risk_level=data.risk_level,
         tags=data.tags or [], note=data.note or "", available_cash=data.available_cash,
-        advisor_id=advisor.id, owner_user_id=owner_user_id,
+        advisor_id=advisor.id if advisor is not None else None,
+        owner_user_id=owner_user_id,
     )
     db.add(client)
     db.flush()
@@ -99,7 +113,72 @@ def create_client(db: Session, data: ClientCreate, creator: User | None = None) 
         ))
     db.commit()
     db.refresh(client)
+
+    # ----- 审计：client.create -----
+    after_client = {
+        **_audit._snapshot_client_basic(client),
+        "advisor_id": client.advisor_id,
+        "service_ids": list(client.service_ids),
+        "owner_user_id": client.owner_user_id,
+        "position_count": len(client.positions),
+    }
+    creator_label = (f"{creator.name}(role={creator.role})") if creator else "系统"
+    _audit.log_client_change(
+        db, actor=creator, action="client.create", client=client,
+        before=None, after=after_client,
+        note=f"{creator_label} 开户：name={client.name} advisor_id={client.advisor_id} "
+             f"service_ids={client.service_ids} create_login={'是' if data.create_login else '否'}",
+        ip_address=ip_address,
+    )
+
+    # ----- 审计：同时创建登录账号时再写一条 user.create -----
+    if created_user_obj is not None:
+        log_user_activity(
+            db, actor=creator, action="user.create",
+            target_user=created_user_obj,
+            note=(f"{creator_label} 开户同步创建 user-client 登录账号："
+                  f"username={created_user_obj.username} owner_of_client_id={client.id}"),
+            ip_address=ip_address, user_agent=request_user_agent,
+        )
+
+    # ----- 账号密码安全分发：客服角色开户时不把账密回传给本人，改以站内信发给管理员 -----
+    if created_user_obj is not None and creator is not None and creator.role == ROLE_SERVICE:
+        from ..models import (
+            User as _U, ROLE_ADMIN, USER_STATUS_DELETED, NOTIF_ACCOUNT_CREDENTIALS,
+        )
+        from .notification_service import dispatch as _notif_dispatch
+
+        admin_ids = [u.id for u in (
+            db.query(_U.id)
+            .filter(_U.role == ROLE_ADMIN,
+                    _U.is_active.is_(True),
+                    _U.status.isnot(USER_STATUS_DELETED))
+            .all()
+        )]
+        if admin_ids and login is not None:
+            uname = login.get("username") or created_user_obj.username
+            pwd = login.get("initial_password") or ""
+            title = "新建客户账户凭证（客服开户）"
+            content_lines = [
+                f"客服「{creator.name}(@{creator.username})」为客户「{client.name}({client.id})」完成开户，并创建了 user-client 登录账户。",
+                "",
+                f"• 归属客户：{client.name}（{client.id}）",
+                f"• 用户ID：{created_user_obj.id}",
+                f"• 用户名：{uname}",
+                f"• 初始密码：{pwd}",
+                f"• 有效期至：{getattr(created_user_obj, 'expires_at', None) or '—'}",
+                "",
+                "💡 请及时将以上账号与初始密码安全地转交客户本人，并提醒客户登录后第一时间修改密码。"
+                "（出于安全考虑，本次创建的账号密码没有直接展示给客服，仅通过管理员站内信分发一次。）",
+            ]
+            _notif_dispatch(db, admin_ids, title, "\n".join(content_lines),
+                            category=NOTIF_ACCOUNT_CREDENTIALS)
+            # 清理返回给客服的敏感字段：用户名留给客服确认，初始密码置空
+            login = {**login, "initial_password": None,
+                     "redelivered_via_admin_inbox": True}
+
     return client, login
+
 
 
 def update_client_fields(db: Session, client: Client, data: ClientUpdate, *, actor: User | None = None) -> Client:
@@ -121,7 +200,7 @@ def update_client_fields(db: Session, client: Client, data: ClientUpdate, *, act
 def update_client_relations(db: Session, client: Client, data: RelationsUpdate, *, actor: User | None = None) -> Client:
     advisor, service_ids = validate_relations(db, data.advisor_id, data.service_ids)
     before = _audit._snapshot_client_relations(client)
-    client.advisor_id = advisor.id
+    client.advisor_id = advisor.id if advisor is not None else None
     client.service_assignments.clear()
     for sid in service_ids:
         db.add(ServiceAssignment(client_id=client.id, service_id=sid))
@@ -147,7 +226,10 @@ def import_relations(db: Session, rows: list[RelationImportRow]) -> dict:
             client_id = row.client_id or _next_client_id(db)
             client = db.get(Client, client_id)
             if client is None:
-                client = Client(id=client_id, name=row.name, advisor_id=advisor.id)
+                client = Client(
+                    id=client_id, name=row.name,
+                    advisor_id=advisor.id if advisor is not None else None,
+                )
                 db.add(client)
                 db.flush()
                 for sid in service_ids:
@@ -155,7 +237,7 @@ def import_relations(db: Session, rows: list[RelationImportRow]) -> dict:
                 created += 1
             else:
                 client.name = row.name
-                client.advisor_id = advisor.id
+                client.advisor_id = advisor.id if advisor is not None else None
                 client.service_assignments.clear()
                 for sid in service_ids:
                     db.add(ServiceAssignment(client_id=client.id, service_id=sid))

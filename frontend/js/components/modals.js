@@ -631,6 +631,13 @@ export function openAdjustModal(code, action) {
                             </div>
 
                             <div>
+                                <label class="block text-sm font-medium text-ink mb-2">交易时间 <span class="text-primary">（可选，补录历史交易时填写）</span></label>
+                                <input type="datetime-local" id="adjustExecutedAt"
+                                    class="w-full px-4 py-2.5 bg-surface-strong border border-hairline rounded-xl text-ink placeholder:text-muted-soft focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all text-sm font-mono">
+                                <p class="text-xs text-muted mt-1">留空使用服务器当前时间；补录历史交易时请选择精确时间</p>
+                            </div>
+
+                            <div>
                                 <label class="block text-sm font-medium text-ink mb-2">手续费设置</label>
                                 <div class="grid grid-cols-2 gap-3">
                                     <select id="adjustFeeMode"
@@ -647,6 +654,18 @@ export function openAdjustModal(code, action) {
                                 </div>
                                 <p id="adjustFeeHint" class="text-xs text-muted mt-1">默认按系统费率配置计算</p>
                             </div>
+
+                            ${isAdd ? `
+                            <div class="flex items-center justify-between gap-3 px-4 py-3 bg-surface-soft rounded-xl">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-medium text-ink">加仓资金来自可用资金</div>
+                                    <p id="adjustFromCashHint" class="text-xs text-muted mt-0.5">开启：买入从可用资金扣款，总资产不变（现金转持仓）</p>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                    <input type="checkbox" id="adjustFromCash" checked class="sr-only peer">
+                                    <div class="relative w-10 h-6 bg-hairline rounded-full peer-checked:bg-primary transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-5 after:h-5 after:bg-white after:rounded-full after:shadow after:transition-transform peer-checked:after:translate-x-4"></div>
+                                </label>
+                            </div>` : ''}
                         </div>
 
                         <!-- 右栏：操作预览（常驻） -->
@@ -717,6 +736,20 @@ export function openAdjustModal(code, action) {
         }
         updateAdjustPreview(position, action);
     });
+
+    // 加仓：资金来源切换提示文案
+    const fromCashToggle = document.getElementById('adjustFromCash');
+    if (fromCashToggle) {
+        fromCashToggle.addEventListener('change', (e) => {
+            const hint = document.getElementById('adjustFromCashHint');
+            if (hint) {
+                hint.textContent = e.target.checked
+                    ? '开启：买入从可用资金扣款，总资产不变（现金转持仓）'
+                    : '关闭：外部转入加仓，不扣可用资金，总资产随之增加';
+            }
+            updateAdjustPreview(position, action);
+        });
+    }
 }
 
 // --- 加仓/减仓实时预览（含手续费双模式计算）---
@@ -869,6 +902,11 @@ export async function executeAdjust(code, action) {
     const currentClient = getCurrentClient();
 
     // 构造调仓请求（手续费双模式：default 不传，后端走全局配置；rate/fixed 显式传值）
+    // 资金来源：加仓时来自可用资金（扣现金） / 外部转入（不扣现金，总资产增加）
+    // 减仓时一律 from_cash=true，卖出所得进可用现金
+    const fromCash = isAdd
+        ? document.getElementById('adjustFromCash')?.checked !== false
+        : true;
     const payload = {
         code: position.code,
         name: position.name,
@@ -876,9 +914,14 @@ export async function executeAdjust(code, action) {
         action: isAdd ? 'buy' : 'sell',
         quantity: qty,
         price: price,
-        from_cash: true,
+        from_cash: fromCash,
         cost_method: 'average',
     };
+    // 可选人为指定交易时间（补录历史交易）；datetime-local 不带秒，补 :00 以完整匹配后端
+    const executedAtEl = document.getElementById('adjustExecutedAt');
+    if (executedAtEl && executedAtEl.value) {
+        payload.executed_at = `${executedAtEl.value}:00`;
+    }
     if (feeCheck.mode) {
         payload.fee_mode = feeCheck.mode;
         payload.fee_value = feeCheck.value;

@@ -5,8 +5,8 @@
 import { showToast, showAdBanner } from '../core/ui.js';
 import {
     isLoggedIn, getToken, getUser, login, logout, roleLabel,
-    fetchNotifications, fetchUnreadCount, markNotificationRead,
-    markAllNotificationsRead, connectSocket,
+    fetchNotifications, fetchNotification, fetchUnreadCount, markNotificationRead,
+    markAllNotificationsRead, connectSocket, deleteSelfUser,
 } from '../services/authService.js';
 import { getFilteredClients, setCurrentClient, loadClients } from '../services/clientService.js';
 import { renderClientList, refreshClientDetail, refreshClientSummaries } from './workbench.js';
@@ -89,6 +89,16 @@ export function renderAuthModal() {
     if (nameEl) nameEl.textContent = user.name || user.username;
     if (roleEl) roleEl.textContent = roleLabel(user);
     if (usernameEl) usernameEl.textContent = user.username;
+
+    // —— 自助删除账户按钮：仅用户(role=user / sub_role 普通/客户)可见，客服/投顾/管理员隐藏 ——
+    const delBtn = document.getElementById('authDeleteSelfBtn');
+    if (delBtn) {
+        if (user?.role === 'user') {
+            delBtn.classList.remove('hidden');
+        } else {
+            delBtn.classList.add('hidden');
+        }
+    }
 }
 
 // ---- 登录 ----
@@ -120,7 +130,21 @@ export async function handleLogin(event) {
         const modal = document.getElementById('identityModal');
         if (modal) { modal.classList.add('hidden'); document.body.style.overflow = ''; }
     } catch (e) {
-        showToast('登录失败：' + (e.message || '未知错误'), 'error');
+        const msg = (e.message || '未知错误').toString();
+        // 把"账户到期请联系管理员续费"这条区分出来单独 toast（红色 + 提示条），
+        // 避免混在"用户名密码错误"里用户注意不到。
+        if (msg.includes('到期') || msg.includes('expired')) {
+            showToast('⚠️ 账户到期 — ' + msg, 'error', 12000);
+            const tip = document.getElementById('loginExpiredHint');
+            if (tip) {
+                tip.textContent = msg + '（请联系管理员续费）';
+                tip.classList.remove('hidden');
+            }
+        } else {
+            showToast('登录失败：' + msg, 'error');
+            const tip = document.getElementById('loginExpiredHint');
+            if (tip) tip.classList.add('hidden');
+        }
     } finally {
         if (btn) { btn.disabled = false; if (original) btn.innerHTML = original; }
     }
@@ -138,22 +162,112 @@ export async function handleLogout() {
     showToast('已退出登录', 'success');
 }
 
+// ---- 普通用户自助注销账户（软删除）----
+export async function handleDeleteSelfAccount() {
+    const user = getUser();
+    if (!user) { showToast('请先登录', 'warning'); return; }
+    if (user.role !== 'user') {
+        showToast('当前角色不允许自助删除账户，请联系管理员', 'error');
+        return;
+    }
+    const username = (user.username || '').toString();
+    const displayName = (user.name || user.username || '').toString();
+    const confirm1 = window.confirm(
+        `⚠️ 账户注销确认\n\n将删除账户「${displayName}（${username}）」并解除所有客户关系。\n此操作为“软删除”，数据不会立即物理清除，但您将无法再登录。\n\n确定继续吗？请在下一个输入框中准确输入您的账号。`,
+    );
+    if (!confirm1) return;
+    const input = window.prompt('为了确保是本人操作，请输入您的「账号」（用户名）：', '');
+    if (input == null) return;
+    if (input.trim() !== username) {
+        showToast('❌ 账号输入不一致，注销操作已取消', 'error');
+        return;
+    }
+    const confirm2 = window.confirm(`最后确认：账户「${username}」下的客户持仓 / 交易流水不会丢失，但账户无法再登录。\n点击「确定」立即注销。`);
+    if (!confirm2) return;
+    try {
+        await deleteSelfUser();
+    } catch (e) {
+        showToast('❌ 注销失败：' + (e?.message || '未知错误'), 'error');
+        return;
+    }
+    // 成功：强制断开实时、清缓存、退出登录并提示回到首页/登录
+    try { disconnectRealtime(); } catch { /* ignore */ }
+    try { await logout(); } catch { /* ignore */ }
+    try { await loadClients(); } catch { /* ignore */ }
+    try { applyAccessControl(); } catch { /* ignore */ }
+    hideNotificationPanel();
+    renderNavState();
+    renderAuthModal();
+    // 关闭身份管理弹窗（避免遮挡）
+    const modal = document.getElementById('identityModal');
+    if (modal) { modal.classList.add('hidden'); document.body.style.overflow = ''; }
+    showToast('✅ 账户已注销成功，欢迎下次使用', 'success', 6000);
+}
+
 // ---- 站内信 ----
 function hideNotificationPanel() {
     const panel = document.getElementById('notificationPanel');
+    const backdrop = document.getElementById('notificationBackdrop');
     if (panel) panel.classList.add('hidden');
+    if (backdrop) backdrop.classList.add('hidden');
 }
 
-export function toggleNotificationPanel() {
+export function toggleNotificationPanel(event) {
     if (!isLoggedIn()) {
         showToast('请先登录', 'warning');
         return;
     }
     const panel = document.getElementById('notificationPanel');
+    const backdrop = document.getElementById('notificationBackdrop');
     if (!panel) return;
-    panel.classList.toggle('hidden');
-    if (!panel.classList.contains('hidden')) refreshNotifications();
+    const willShow = panel.classList.contains('hidden');
+    if (willShow) {
+        panel.classList.remove('hidden');
+        if (backdrop) backdrop.classList.remove('hidden');
+        refreshNotifications();
+    } else {
+        hideNotificationPanel();
+    }
+    // 点击铃铛/按钮时不冒泡到 document 的全局监听，否则又被当成"点击空白"立刻关闭
+    if (event && typeof event.stopPropagation === 'function') {
+        event.stopPropagation();
+    }
 }
+
+// 在 initAuth 时安装：点击站内信面板外 + 遮罩层都能关闭；按 ESC 同样关闭
+function _installNotificationCloseHooks() {
+    const panel = document.getElementById('notificationPanel');
+    const backdrop = document.getElementById('notificationBackdrop');
+    const bell = document.getElementById('notificationBell');
+    if (backdrop) {
+        backdrop.addEventListener('click', (e) => {
+            // 点击遮罩（空白处）→ 关闭
+            e.stopPropagation();
+            hideNotificationPanel();
+        });
+    }
+    if (panel) {
+        panel.addEventListener('click', (e) => e.stopPropagation());
+    }
+    document.addEventListener('click', (e) => {
+        const p = document.getElementById('notificationPanel');
+        if (!p) return;
+        if (p.classList.contains('hidden')) return;
+        // 任何在"站内信显示范围"（panel DOM）之外的点击立即关闭
+        // 铃铛按钮也排除（由 toggleNotificationPanel 处理，切换逻辑自己管）
+        if (p.contains(e.target)) return;
+        const bellEl = document.getElementById('notificationBell');
+        if (bellEl && bellEl.contains(e.target)) return;
+        hideNotificationPanel();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const p = document.getElementById('notificationPanel');
+            if (p && !p.classList.contains('hidden')) hideNotificationPanel();
+        }
+    });
+}
+
 
 function notifTime(iso) {
     const d = new Date(iso);
@@ -209,12 +323,66 @@ function updateUnreadBadge(count) {
 }
 
 export async function openNotification(id) {
+    const modal = document.getElementById('notificationDetailModal');
+    const titleEl = document.getElementById('notifDetailTitle');
+    const timeEl = document.getElementById('notifDetailTime');
+    const catEl = document.getElementById('notifDetailCategory');
+    const badgeEl = document.getElementById('notifDetailReadBadge');
+    const contentEl = document.getElementById('notifDetailContent');
+    const loadingEl = document.getElementById('notifDetailLoading');
+    if (!modal) return;
     try {
-        await markNotificationRead(id);
+        // 打开时先关闭列表面板 + 显示加载态
+        hideNotificationPanel();
+        contentEl.classList.add('hidden');
+        contentEl.textContent = '';
+        if (loadingEl) loadingEl.classList.remove('hidden');
+        if (titleEl) titleEl.textContent = '';
+        if (timeEl) timeEl.textContent = '';
+        if (catEl) catEl.textContent = '';
+        if (badgeEl) badgeEl.textContent = '';
+        modal.classList.remove('hidden');
+
+        const n = await fetchNotification(id);
+        if (loadingEl) loadingEl.classList.add('hidden');
+        contentEl.classList.remove('hidden');
+        if (titleEl) titleEl.textContent = n.title || '(无标题)';
+        if (timeEl) timeEl.textContent = notifTime(n.created_at);
+        if (catEl) catEl.textContent = (n.category || 'system').toLowerCase();
+        if (badgeEl) {
+            badgeEl.textContent = n.is_read ? '已读' : '未读';
+            badgeEl.classList.toggle('border-primary/30', !n.is_read);
+            badgeEl.classList.toggle('text-primary', !n.is_read);
+        }
+        contentEl.textContent = n.content ?? '';
+
+        // 已读状态已在后端 get_notification 中自动标记
         refreshNotifications();
     } catch (e) {
-        showToast('操作失败：' + (e.message || '未知错误'), 'error');
+        if (loadingEl) loadingEl.classList.add('hidden');
+        contentEl.classList.remove('hidden');
+        contentEl.textContent = '加载消息详情失败：' + (e?.message || '未知错误');
+        showToast('加载消息详情失败', 'error');
     }
+}
+
+function closeNotificationDetail() {
+    const modal = document.getElementById('notificationDetailModal');
+    if (modal) modal.classList.add('hidden');
+}
+
+function _installNotificationDetailHooks() {
+    const modal = document.getElementById('notificationDetailModal');
+    const backdrop = document.getElementById('notificationDetailBackdrop');
+    const closeBtn = document.getElementById('notifDetailCloseBtn');
+    const okBtn = document.getElementById('notifDetailOkBtn');
+    if (backdrop) backdrop.addEventListener('click', closeNotificationDetail);
+    if (closeBtn) closeBtn.addEventListener('click', closeNotificationDetail);
+    if (okBtn) okBtn.addEventListener('click', closeNotificationDetail);
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (modal && !modal.classList.contains('hidden')) closeNotificationDetail();
+    });
 }
 
 export async function markAllRead() {
@@ -260,6 +428,8 @@ export function initAuth() {
     renderNavState();
     renderAuthModal();
     applyAccessControl();
+    _installNotificationCloseHooks();
+    _installNotificationDetailHooks();
     if (isLoggedIn()) {
         refreshNotifications();
         connectRealtime();

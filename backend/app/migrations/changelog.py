@@ -44,6 +44,30 @@ CHANGELOG: List[MigrationEntry] = [
         kind="add_index",   # 逻辑级说明：service_assignments → service 关联已存在，无需新增列
         identifier="service_names_via_users",
     ),
+    MigrationEntry(
+        introduced_version="v0.1.4",
+        description="放开 clients.advisor_id NOT NULL：允许未分配投顾/客服（留空由 owner_user_id 本人登录管理持仓）",
+        table="clients",
+        kind="add_column",  # 结构变更审计：老库启动时走"建 new→拷→drop→rename"重建
+        identifier="advisor_id_nullable",
+        column_type="VARCHAR(64)",
+    ),
+    MigrationEntry(
+        introduced_version="v0.1.5",
+        description="账户生命周期：users 增加 status/expires_at；到期自动变 expired 禁止登录，支持续费/充值/重置密码/软删除",
+        table="users",
+        kind="add_column",
+        identifier="status",
+        column_type="VARCHAR(16)",
+    ),
+    MigrationEntry(
+        introduced_version="v0.1.5",
+        description="账户生命周期：expires_at 到期日；admin=null 表示永久，其余按赠送/续费计算",
+        table="users",
+        kind="add_column",
+        identifier="expires_at",
+        column_type="DATETIME",
+    ),
 ]
 
 

@@ -3,8 +3,9 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import User
+from ..models import User, USER_STATUS_EXPIRED, USER_STATUS_DELETED
 from .security import decode_access_token
+from ..services import auth_service
 
 
 def get_current_user(
@@ -21,8 +22,18 @@ def get_current_user(
 
     user_id = payload.get("sub")
     user = db.get(User, user_id)
-    if user is None or not user.is_active:
+    if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已禁用")
+    # 任何请求入口：根据 expires_at 自动刷新 expired/active（即便 token 仍然在有效期，也能限制到期用户）
+    auth_service.sync_expired_status(db, user)
+    if not user.is_active or user.status == USER_STATUS_DELETED or user.status == USER_STATUS_EXPIRED:
+        if user.status == USER_STATUS_EXPIRED:
+            detail = auth_service.EXPIRED_ERROR
+        elif user.status == USER_STATUS_DELETED:
+            detail = "账号已删除"
+        else:
+            detail = "用户不存在或已禁用"
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
     return user
 
 

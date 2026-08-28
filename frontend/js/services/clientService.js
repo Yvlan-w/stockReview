@@ -362,6 +362,21 @@ export async function fetchCostBasis(clientId, { method = 'average', code = null
     return null;
 }
 
+// 逐笔交易流水列表：买入/卖出每笔独立行，包含 market / executed_at / fee_* 三费明细 / realized_pnl
+export async function fetchTransactions(clientId, { limit = 100 } = {}) {
+    if (!clientId) return [];
+    try {
+        const resp = await fetch(`/api/clients/${clientId}/transactions?limit=${limit}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}` }
+        });
+        if (resp.ok) return await resp.json();
+        console.warn('查询交易流水失败:', resp.status);
+    } catch (e) {
+        console.warn('查询交易流水异常:', e);
+    }
+    return [];
+}
+
 // 交易流水按股票分组汇总：买卖量额、累计已实现盈亏、手续费分类总计
 export async function fetchTransactionsSummary(clientId, { code = null } = {}) {
     if (!clientId) return null;

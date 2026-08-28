@@ -85,7 +85,83 @@ export async function logout() {
 }
 
 export async function fetchMe() {
-    return request('/api/auth/me');
+    const me = await request('/api/auth/me');
+    // 兜底：后端同步刷新 expired 后如果踢出 403 时请求层已经抛错；
+    // 这里只负责把最新用户资料写回 session（避免过期日跨零点刷新也能在前端显示）
+    if (me && me.id) {
+        const token = getToken();
+        if (token) localStorage.setItem(USER_KEY, JSON.stringify(me));
+    }
+    return me;
+}
+
+// ---- 生命周期到期剩余天数的前端展示工具 ----
+export function licenseBadgeOf(user) {
+    if (!user) return { html: '', classes: '' };
+    if (user.role === 'admin') {
+        return { text: '永久', html: '<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">永久有效</span>', level: 'forever' };
+    }
+    const days = Number.isFinite(user.remaining_days) ? user.remaining_days : null;
+    const status = user.status || 'active';
+    if (status === 'deleted') return { text: '已删除', html: '<span class="text-xs px-2 py-0.5 rounded bg-hairline text-muted">已删除</span>', level: 'deleted' };
+    if (status === 'expired' || (days !== null && days <= 0)) {
+        return {
+            text: '已到期',
+            html: '<span class="text-xs px-2 py-0.5 rounded bg-negative/10 text-negative">已到期（限制登录）</span>',
+            level: 'expired',
+        };
+    }
+    if (days === null) {
+        return { text: '长期', html: '<span class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">长期</span>', level: 'forever' };
+    }
+    let cls = 'bg-positive/10 text-positive';
+    let label = `剩余 ${days} 天`;
+    if (days <= 7) cls = 'bg-negative/10 text-negative';
+    else if (days <= 30) cls = 'bg-amber-500/15 text-amber-600';
+    return { text: label, html: `<span class="text-xs px-2 py-0.5 rounded ${cls}">${label}</span>`, level: days <= 7 ? 'danger' : (days <= 30 ? 'warn' : 'ok'), days };
+}
+
+// ---- 用户生命周期管理（管理员操作）----
+export async function listUsers() { return request('/api/users'); }
+export async function deleteUser(id) { return request(`/api/users/${id}`, { method: 'DELETE' }); }
+export async function deleteSelfUser() { return request('/api/users/me', { method: 'DELETE' }); }
+export async function resetUserPassword(id, password = null) {
+    return request(`/api/users/${id}/reset-password`, {
+        method: 'POST', body: JSON.stringify({ password: password || null }),
+    });
+}
+export async function renewUser(id, extendDays) {
+    return request(`/api/users/${id}/renew`, { method: 'POST', body: JSON.stringify({ extend_days: extendDays }) });
+}
+export async function patchUserLifecycle(id, patch) {
+    const body = {};
+    if ('status' in patch) body.status = patch.status || null;
+    if ('expires_at' in patch) body.expires_at = patch.expires_at || null;
+    if ('license_days' in patch) body.license_days = Number.isFinite(patch.license_days) ? patch.license_days : null;
+    return request(`/api/users/${id}/lifecycle`, { method: 'PATCH', body: JSON.stringify(body) });
+}
+
+/**
+ * 当 user-client 账户未关联客户档案时，调用后端自动创建一个档案并回填 owner_user_id。
+ * 返回 { client_id, created }；已存在档案时 created=false（幂等）。
+ * 这样「分配关系」按钮就不需要再 toast 报错，而是自动补齐档案。
+ */
+export async function ensureClientProfile(userId) {
+    return request(`/api/users/${userId}/ensure-client-profile`, { method: 'POST' });
+}
+// ---- 审计日志查询（后台「查看日志」Tab）----
+export async function listAuditLogs(params = {}) {
+    const u = new URLSearchParams();
+    if (params.page) u.set('page', params.page);
+    if (params.page_size) u.set('page_size', params.page_size);
+    if (params.keyword) u.set('keyword', params.keyword);
+    if (params.action) u.set('action', params.action);
+    if (params.target_type) u.set('target_type', params.target_type);
+    if (params.actor_id) u.set('actor_id', params.actor_id);
+    if (params.start) u.set('start', params.start);
+    if (params.end) u.set('end', params.end);
+    const qs = u.toString();
+    return request(`/api/audit-logs${qs ? `?${qs}` : ''}`);
 }
 
 // ---- 自助：修改个人密码（所有登录用户均可） ----
@@ -200,6 +276,10 @@ export async function importRelationsCsv(text) {
 // ---- 站内信接口 ----
 export async function fetchNotifications() {
     return request('/api/notifications');
+}
+
+export async function fetchNotification(id) {
+    return request(`/api/notifications/${id}`);
 }
 
 export async function fetchUnreadCount() {
