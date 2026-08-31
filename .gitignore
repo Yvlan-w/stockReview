@@ -89,6 +89,7 @@ pnpm-debug.log*
 *.sublime-project
 *.sublime-workspace
 .history/
+.workbuddy/
 
 # ============================================================
 # 操作系统生成文件
