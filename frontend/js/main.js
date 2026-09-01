@@ -21,7 +21,7 @@ import {
 import { fetchLiveNews, showMoreNews } from './services/newsService.js';
 import {
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
-    executeAdjust, savePosition, deletePosition,
+    executeAdjust, savePosition, revokePosition,
 } from './components/modals.js';
 import {
     openIdentityModal, closeIdentityModal,
@@ -58,7 +58,7 @@ Object.assign(window, {
     fetchLiveNews, showMoreNews,
     openIdentityModal, closeIdentityModal,
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
-    executeAdjust, savePosition, deletePosition,
+    executeAdjust, savePosition, revokePosition,
     handleLogin, handleLogout, toggleNotificationPanel, openNotification, markAllRead,
     handleDeleteSelfAccount,
     openAdminPanel, closeAdminPanel, switchAdminTab, refreshAdminPanel,

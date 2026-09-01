@@ -194,6 +194,8 @@ def _migrate_sqlite_columns():
         ("transactions", "prev_cost_price", "FLOAT"),
         # 调仓审计尾链（nullable FK，允许系统/种子/公司行动无操作人场景为空）
         ("transactions", "audit_log_id", "INTEGER"),
+        # 卖出批次匹配记账（FIFO 物理批次口径，用于精确撤销 + 跨批次检测）
+        ("transactions", "matched_lots", "JSON"),
         # 账号级活动溯源 IP + UA：复用 audit_logs 扩列，不新建独立 account_activity_logs 表
         ("audit_logs", "ip_address", "VARCHAR(45)"),
         ("audit_logs", "user_agent", "TEXT"),

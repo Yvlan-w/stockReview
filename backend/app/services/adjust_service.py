@@ -18,13 +18,15 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import Client, Position, Transaction, User
+from ..models import Client, CostBasisLot, Position, Transaction, User
 from .audit_service import build_transaction_audit_log
 from .cost_basis_service import (
     CostMethod,
+    apply_match_updates,
     calculate_sell_realized_pnl,
     create_buy_lot,
     infer_market_from_code,
+    match_sell_fifo_lifo,
 )
 from .pnl_service import (
     calc_buy_fee,
@@ -158,6 +160,24 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
         trans_fee = s_breakdown["transfer_fee"]
         fee_amount = s_breakdown["total_fee"]
         realized_pnl = net_rlz
+
+        # 记录卖出批次明细（matched_lots 落库）：
+        #   - FIFO/LIFO：calculate_sell_realized_pnl 内部已消费批次并返回 matches，直接采用；
+        #   - average：历史口径不消费批次，这里额外按 FIFO 轻量记账（仅减 remaining_quantity，
+        #     不改变 average 的含费移动加权盈亏口径），使 matched_lots 真实可用，
+        #     支撑"精确批次撤销"与"跨批次禁止撤销"。历史数据若完全无可用批次则跳过（matched=[]）。
+        if cost_method == "average":
+            try:
+                avg_book = match_sell_fifo_lifo(
+                    db, client_id=client.id, code=code,
+                    sell_quantity=quantity, method="fifo",
+                )
+                if avg_book:
+                    apply_match_updates(db, avg_book)
+                    cost_matches = avg_book
+            except ValueError:
+                # 老库未建档 / 批次不足：不记账，撤销时按"无批次"分支处理
+                cost_matches = []
     else:
         raise AdjustError(f"非法操作类型：{action}")
 
@@ -214,6 +234,16 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
     )
     db.add(transaction)
     db.flush()  # 取 id
+
+    # 卖出批次匹配明细落库（用于精确撤销 + 跨批次检测）；买入/调整为空
+    transaction.matched_lots = [
+        {
+            "lot_id": m.lot_id,
+            "buy_transaction_id": m.buy_transaction_id,
+            "matched_quantity": m.matched_quantity,
+        }
+        for m in (cost_matches or [])
+    ] or None
 
     # ------------------------------------------------------------------
     # ②-1：写 Transaction 级审计尾链（与 Transaction 同事务 flush，不单独 commit）
@@ -319,3 +349,113 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
         ],
         "cost_method": cost_method,
     }
+
+
+class RevokeError(ValueError):
+    """撤销业务校验失败（跨批次 / 无记录 / 未知类型等）。携带 status_code 供路由层映射 HTTP。"""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def reverse_last_transaction(db: Session, client: Client, code: str) -> dict:
+    """撤销某持仓最近一笔操作（按 executed_at DESC, id DESC 取最新一条），精确批次反转。
+
+    行为按被撤销交易的操作类型区分：
+      - 'adjust'：仅删除该策略复盘记录（不动持仓 / 现金 / 批次）；
+      - 'sell'  ：
+            * 若 matched_lots 跨越多个买入批次 → 抛 RevokeError(409) 禁止撤销，
+              并清晰说明原因（避免误删历史批次记录）；
+            * 否则恢复持仓数量、回扣卖出时增加的现金、按 matched_lots 回补对应成本批次
+              的 remaining_quantity，并删除该卖出流水（其本身即一条复盘记录）。
+              仅删除"目标批次"的记录，更早批次的复盘记录完整保留。
+      - 'buy'  ：退回买入占用的现金（含手续费）、删除对应成本批次、减少（或归零删除）
+                 持仓行，并删除该买入流水。
+
+    返回 dict：{'action', 'transaction_id', 'restored_quantity?'}。
+    """
+    tx = db.query(Transaction).filter(
+        Transaction.client_id == client.id, Transaction.code == code,
+    ).order_by(Transaction.executed_at.desc().nullslast(), Transaction.id.desc()).first()
+    if tx is None:
+        raise RevokeError(f"客户 {client.id} 的 {code} 没有可撤销的操作记录", status_code=404)
+
+    if tx.action == "adjust":
+        db.delete(tx)
+        db.commit()
+        return {"action": "adjust", "transaction_id": tx.id}
+
+    if tx.action == "sell":
+        matched = tx.matched_lots or []
+        distinct_lots = {m.get("lot_id") for m in matched if m.get("lot_id") is not None}
+        # 跨批次保护：一笔卖出若命中等多个买入批次，禁止整体撤销，避免破坏历史批次记录
+        if len(distinct_lots) > 1:
+            raise RevokeError(
+                f"该笔卖出跨越 {len(distinct_lots)} 个买入批次"
+                f"（批次 id：{sorted(distinct_lots)}），系统无法精确撤销单一批次的"
+                f"持仓与成本记录。请改用手工调仓（加仓 / 减仓）完成调整后再试。",
+                status_code=409,
+            )
+
+        amount = (tx.quantity or 0) * (tx.price or 0.0)
+        sell_fee = tx.fee_amount or 0.0
+        # 卖出时现金增加 (amount - 手续费)，撤销则回扣这部分现金
+        client.available_cash = round((client.available_cash or 0.0) - (amount - sell_fee), 2)
+
+        position = db.query(Position).filter(
+            Position.client_id == client.id, Position.code == code,
+        ).first()
+        if position is None:
+            # 卖出后已清仓：撤销卖出 = 恢复该持仓（成本价取交易时的 cost_price，缺失时回退到成交价）
+            position = Position(
+                client_id=client.id, code=code,
+                name=tx.name, sector=None,
+                quantity=tx.quantity,
+                cost_price=tx.cost_price if tx.cost_price is not None else (tx.price or 0.0),
+            )
+            db.add(position)
+        else:
+            position.quantity += tx.quantity
+
+        # 回补成本批次：有 matched_lots 明细时按记录恢复剩余量；
+        # 老数据（average 无批次记账）缺明细则跳过批次回补
+        if matched:
+            qty_by_lot: dict[int, int] = {}
+            lot_ids: list[int] = []
+            for m in matched:
+                lid = m.get("lot_id")
+                if lid is not None:
+                    lot_ids.append(lid)
+                    qty_by_lot[lid] = qty_by_lot.get(lid, 0) + m.get("matched_quantity", 0)
+            lots = db.query(CostBasisLot).filter(CostBasisLot.id.in_(lot_ids)).all() if lot_ids else []
+            for lot in lots:
+                lot.remaining_quantity = (lot.remaining_quantity or 0) + qty_by_lot.get(lot.id, 0)
+
+        db.delete(tx)
+        db.commit()
+        return {"action": "sell", "transaction_id": tx.id, "restored_quantity": tx.quantity}
+
+    if tx.action == "buy":
+        amount = (tx.quantity or 0) * (tx.price or 0.0)
+        buy_fee = tx.fee_amount or 0.0
+        # 买入占用现金（含手续费），撤销则退回
+        client.available_cash = round((client.available_cash or 0.0) + amount + buy_fee, 2)
+        # 删除对应的成本批次（该买入建档的物理批次）
+        db.query(CostBasisLot).filter(
+            CostBasisLot.buy_transaction_id == tx.id,
+        ).delete(synchronize_session=False)
+        # 减少 / 删除持仓行
+        position = db.query(Position).filter(
+            Position.client_id == client.id, Position.code == code,
+        ).first()
+        if position is not None:
+            if position.quantity <= (tx.quantity or 0):
+                db.delete(position)
+            else:
+                position.quantity -= tx.quantity
+        db.delete(tx)
+        db.commit()
+        return {"action": "buy", "transaction_id": tx.id, "restored_quantity": tx.quantity}
+
+    raise RevokeError(f"未知操作类型：{tx.action}", status_code=400)

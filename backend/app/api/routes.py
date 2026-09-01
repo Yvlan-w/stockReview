@@ -29,7 +29,7 @@ from ..schemas import (
 from ..services import auth_service, client_service, risk_engine, notification_service
 from ..services import market_service
 from ..services import market_analysis_service
-from ..services.adjust_service import execute_adjust, AdjustError
+from ..services.adjust_service import execute_adjust, reverse_last_transaction, AdjustError, RevokeError
 from ..services import cost_basis_service
 from ..services.audit_service import log_user_activity
 
@@ -1104,6 +1104,7 @@ def _create_transaction_impl(db: Session, client_id: str, body, trade_date: str)
         client_id=client_id,
         code=body.code,
         name=body.name,
+        market=cost_basis_service.infer_market_from_code(body.code),
         action=body.action,
         quantity=body.quantity,
         price=body.price,
@@ -1113,6 +1114,7 @@ def _create_transaction_impl(db: Session, client_id: str, body, trade_date: str)
         fee_amount=fee_amount,
         realized_pnl=realized_pnl,
         trade_date=trade_date,
+        executed_at=dt.datetime.utcnow(),
     )
     db.add(tx)
     db.commit()
@@ -1175,6 +1177,39 @@ def do_adjust(client_id: str, body: AdjustRequest, db: Session = Depends(get_db)
         "cost_basis_matches": result.get("cost_basis_matches", []),
         "cost_method": result.get("cost_method", body.cost_method),
     }
+
+
+# ========== 撤销某持仓最近一笔操作（精确批次反转） ==========
+@router.post("/clients/{client_id}/positions/{code}/revoke", status_code=200)
+def revoke_position(
+    client_id: str,
+    code: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """撤销某持仓最近一笔操作（按时间倒序取最新一条），精确批次反转。
+
+    语义（满足"仅删除目标批次记录，更早批次完整保留" + "跨批次禁止撤销"）：
+      - 该笔为 'adjust'（编辑产生的复盘记录）→ 仅删除该记录；
+      - 该笔为 'sell' 且 matched_lots 横跨多个买入批次 → 返回 409 并说明原因，禁止撤销；
+      - 该笔为 'sell'（单批次）→ 恢复持仓数量、回扣现金、回补对应成本批次，删除该卖出流水；
+      - 该笔为 'buy' → 退回现金、删除成本批次、减少/删除持仓行，删除该买入流水。
+    """
+    client = client_service.get_visible_client(db, user, client_id)
+    try:
+        result = reverse_last_transaction(db, client, code)
+    except RevokeError as e:
+        raise HTTPException(getattr(e, "status_code", 400), detail=str(e)) from e
+
+    # 撤销后尽力刷新当日快照（失败不影响已提交的撤销事务）
+    try:
+        import logging as _logging
+        from ..services.pnl_service import compute_portfolio, write_daily_snapshot
+        pf = compute_portfolio(db, client)
+        write_daily_snapshot(db, client, pf)
+    except Exception as e:  # noqa: BLE001
+        _logging.getLogger(__name__).warning("撤销后快照更新失败(client=%s, %s): %s", client.id, code, e)
+    return result
 
 
 # ========== 策略复盘：成本基础汇总（3 种方法切换） ==========

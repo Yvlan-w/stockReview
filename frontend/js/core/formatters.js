@@ -23,12 +23,18 @@ export function getBadgeClass(type) {
     switch (type) {
         case 'buy': return 'badge-up';
         case 'sell': return 'badge-down';
+        case 'adjust': return 'badge-adjust';
         default: return 'badge-neutral';
     }
 }
 
 export function getTypeLabel(type) {
-    return type === 'buy' ? '买入' : '卖出';
+    switch (type) {
+        case 'buy': return '买入';
+        case 'sell': return '卖出';
+        case 'adjust': return '调整';
+        default: return '';
+    }
 }
 
 export function getResultBadge(result) {

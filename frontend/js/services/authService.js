@@ -65,6 +65,16 @@ async function request(path, options = {}) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
         const detail = data.detail || '请求失败';
+        // 令牌失效（401 过期/无效）或账户到期被踢（403）：清除本地会话并广播过期事件，
+        // 由 auth.js 统一处理"强制登出 + 打开登录弹窗"，避免界面仍显示已登录的僵尸态。
+        if (res.status === 401 || res.status === 403) {
+            try { clearSession(); } catch { /* 忽略 */ }
+            try {
+                window.dispatchEvent(new CustomEvent('auth:expired', {
+                    detail: { status: res.status, message: typeof detail === 'string' ? detail : JSON.stringify(detail) },
+                }));
+            } catch { /* 忽略 */ }
+        }
         throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
     }
     return data;

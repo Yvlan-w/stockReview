@@ -1,7 +1,7 @@
 // ============================================================
 // 持仓弹窗组件：新增/编辑/加仓/减仓/删除
 // ============================================================
-import { getUserPositions, saveUserPositions, getCurrentClient, loadClients, executeAdjustApi, fetchClientPortfolio, fetchClientPnlHistory, searchStocksApi, syncClientState } from '../services/clientService.js';
+import { getUserPositions, saveUserPositions, getCurrentClient, loadClients, executeAdjustApi, fetchClientPortfolio, fetchClientPnlHistory, searchStocksApi, syncClientState, revokePositionApi, createAdjustRecord } from '../services/clientService.js';
 import { formatCurrency, formatNumber, getPnLColor } from '../core/formatters.js';
 import { SECTORS } from '../core/config.js';
 import { showToast, hideToast } from '../core/ui.js';
@@ -1099,21 +1099,73 @@ export async function savePosition(originalCode = null) {
     positions[idx] = { name, code, quantity, costPrice, sector };
 
     if (!(await persistPositions(positions))) return;
+
+    // 需求一：编辑持仓后在策略复盘模块自动新增一条"调整"记录
+    // （黄色"调整"标签；其余字段与"买入"记录保持一致，仅记录当前编辑后的快照）
+    try {
+        const currentClient = getCurrentClient();
+        if (currentClient) {
+            await createAdjustRecord(currentClient.id, {
+                code,
+                name,
+                quantity,
+                price: costPrice,
+                cost_price: costPrice,
+                trade_date: new Date().toISOString().slice(0, 10),
+            });
+        }
+    } catch (e) {
+        console.warn('写入调整复盘记录失败:', e);
+    }
+
     closePositionModal();
     refreshAll();
     showToast('✅ 持仓已更新', 'success');
 }
 
-// --- 删除持仓 ---
-export async function deletePosition(code) {
+// --- 撤销持仓：精确批次反转最近一笔操作（买入/卖出/调整），并清理对应复盘记录 ---
+export async function revokePosition(code) {
     if (!guardEdit()) return;
     const position = getUserPositions().find(p => p.code === code);
     if (!position) return;
 
-    if (confirm(`确定删除「${position.name}(${position.code})」的持仓吗？`)) {
-        let positions = getUserPositions().filter(p => p.code !== code);
-        if (!(await persistPositions(positions))) return;
-        refreshAll();
-        showToast('✅ 持仓已删除', 'success');
+    if (!confirm(
+        `确定撤销「${position.name}(${position.code})」最近一笔操作吗？\n\n` +
+        `撤销将按批次精确回退最近一次买入 / 卖出 / 编辑，并同步清理对应的策略复盘记录` +
+        `（更早批次的复盘记录会完整保留）。`)) {
+        return;
+    }
+    const currentClient = getCurrentClient();
+    if (!currentClient) { showToast('❌ 未选择客户', 'error'); return; }
+
+    try {
+        const result = await revokePositionApi(currentClient.id, code);
+        // 重新拉取组合与盈亏历史，确保持仓 / 现金 / 复盘面板同步刷新（与调仓后一致）
+        try {
+            const [portfolio, pnlHistory] = await Promise.all([
+                fetchClientPortfolio(currentClient.id),
+                fetchClientPnlHistory(currentClient.id),
+            ]);
+            if (portfolio) {
+                syncClientState(portfolio);
+                refreshAll(portfolio, pnlHistory);
+            } else {
+                refreshAll();
+            }
+        } catch (e) {
+            console.warn('撤销后数据刷新失败:', e);
+            refreshAll();
+        }
+        const label = result?.action === 'sell' ? '卖出'
+            : result?.action === 'buy' ? '买入'
+            : result?.action === 'adjust' ? '调整' : '操作';
+        showToast(`✅ 已撤销最近一笔「${label}」操作`, 'success');
+    } catch (e) {
+        // 跨批次卖出：后端返回 409，明确提示原因，不静默失败
+        if (e?.status === 409) {
+            showToast('⚠️ ' + (e.message || '该笔卖出跨越多个批次，无法精确撤销') + '（请改用手工调仓）', 'error', 10000);
+        } else {
+            showToast('❌ 撤销失败：' + (e?.message || '未知错误'), 'error');
+        }
     }
 }

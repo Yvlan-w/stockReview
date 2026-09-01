@@ -114,7 +114,7 @@ function renderCostPriceCell(tx) {
 
 // 单条交易流水 → 时间线卡片 HTML（每笔独立一行，不再合并）
 function renderTradeRow(tx) {
-    const isBuy = tx.action === 'buy';
+    const isBuy = tx.action === 'buy' || tx.action === 'adjust';
     const market = MARKET_LABEL[tx.market] || tx.market || '';
     const marketBadge = market
         ? `<span class="px-1.5 py-0.5 text-[10px] font-medium rounded border border-hairline text-muted/80 ml-1">${market}</span>`
@@ -153,7 +153,7 @@ function renderTradeRow(tx) {
 
     return `
         <div class="relative pl-14 pr-5 py-5 hover:bg-surface-soft/30 transition-colors">
-            <div class="absolute left-4 top-6 w-3 h-3 rounded-full ${isBuy ? 'bg-up' : 'bg-down'} ring-4 ${isBuy ? 'ring-red-50' : 'ring-green-50'}"></div>
+            <div class="absolute left-4 top-6 w-3 h-3 rounded-full ${tx.action === 'buy' ? 'bg-up ring-red-50' : tx.action === 'sell' ? 'bg-down ring-green-50' : 'bg-amber-500 ring-amber-100'} ring-4"></div>
 
             <div class="flex flex-col lg:flex-row lg:items-start gap-3">
                 <div class="lg:w-64 flex-shrink-0">

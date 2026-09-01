@@ -344,6 +344,9 @@ class Transaction(Base):
                           ForeignKey("audit_logs.id", ondelete="SET NULL"),
                           nullable=True, index=True,
                           comment="关联的操作审计日志（人工调仓必填，种子/系统/公司行动可为空）")
+    # 卖出批次匹配记账（FIFO 物理批次口径）：[{lot_id, buy_transaction_id, matched_quantity}]
+    # 用于「撤销」时精确识别该卖出跨越的批次；买入/调整为空
+    matched_lots = Column(JSON, nullable=True, comment="卖出批次匹配明细（FIFO 记账用），买入/调整为空")
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
 

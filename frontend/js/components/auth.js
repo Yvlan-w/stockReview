@@ -13,6 +13,8 @@ import { renderClientList, refreshClientDetail, refreshClientSummaries } from '.
 import { isWorkbenchVisible, canEdit, canAccessAdminPanel, canAccessOnboarding } from '../permissions/access.js';
 
 let socket = null;
+// 标记位：避免 token 过期时并发请求同时触发多次强制登出 / 弹窗
+let _authExpiredHandling = false;
 
 // ---- 权限驱动界面可见性 ----
 function applyAccessControl() {
@@ -115,6 +117,7 @@ export async function handleLogin(event) {
     if (btn) btn.disabled = true;
     try {
         await login(username, password);
+        _authExpiredHandling = false;
         showToast('登录成功', 'success');
         showAdBanner();   // 每次登录成功后重新展示广告 Banner
         renderNavState();
@@ -152,6 +155,7 @@ export async function handleLogin(event) {
 
 // ---- 登出 ----
 export async function handleLogout() {
+    _authExpiredHandling = false;
     disconnectRealtime();
     await logout();
     renderNavState();
@@ -160,6 +164,37 @@ export async function handleLogout() {
     applyAccessControl();
     hideNotificationPanel();
     showToast('已退出登录', 'success');
+}
+
+// ---- token 过期 / 账户到期：强制登出并引导重新登录 ----
+function handleAuthExpired(event) {
+    // 幂等：并发的多个 401/403 只处理一次，避免重复弹窗 / 重复 toast
+    if (_authExpiredHandling) return;
+    _authExpiredHandling = true;
+    const detail = (event && event.detail) || {};
+    const message = typeof detail.message === 'string' ? detail.message : '';
+    try { disconnectRealtime(); } catch { /* ignore */ }
+    try { logout(); } catch { /* ignore */ }
+    renderNavState();
+    renderAuthModal();
+    applyAccessControl();
+    hideNotificationPanel();
+    // 打开登录弹窗（引导重新登录），并提示原因
+    const modal = document.getElementById('identityModal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+    }
+    if (message.includes('到期') || message.includes('expired')) {
+        const tip = document.getElementById('loginExpiredHint');
+        if (tip) {
+            tip.textContent = message + '（请联系管理员续费）';
+            tip.classList.remove('hidden');
+        }
+        showToast('⚠️ 账户已到期，请重新登录或联系管理员续费', 'error', 10000);
+    } else {
+        showToast('登录已过期，请重新登录', 'error', 8000);
+    }
 }
 
 // ---- 普通用户自助注销账户（软删除）----
@@ -428,6 +463,8 @@ export function initAuth() {
     renderNavState();
     renderAuthModal();
     applyAccessControl();
+    // 监听 token 失效事件（authService.request 在 401/403 时广播），自动登出并引导登录
+    window.addEventListener('auth:expired', handleAuthExpired);
     _installNotificationCloseHooks();
     _installNotificationDetailHooks();
     if (isLoggedIn()) {

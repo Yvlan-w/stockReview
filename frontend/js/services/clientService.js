@@ -344,6 +344,48 @@ export async function adjustClient(clientId, payload) {
     return await executeAdjustApi(clientId, payload);
 }
 
+// 撤销某持仓最近一笔操作（精确批次反转）：POST /api/clients/{id}/positions/{code}/revoke
+// 后端按 (executed_at, id) 倒序取最新一笔交易并反转：
+//   - 卖出跨多个批次 → 返回 409（err.status === 409），前端提示原因
+//   - 卖出单批次 / 买入 / 调整(adjust) → 200，返回 { action, transaction_id, restored_quantity? }
+export async function revokePositionApi(clientId, code) {
+    if (!clientId || !code) throw new Error('缺少客户或股票代码');
+    const resp = await fetch(`/api/clients/${encodeURIComponent(clientId)}/positions/${encodeURIComponent(code)}/revoke`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}` }
+    });
+    if (resp.ok) return await resp.json();
+    let message = '撤销失败，请稍后重试';
+    try {
+        const body = JSON.parse(await resp.text());
+        if (body?.detail) message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+    } catch { /* 忽略解析失败 */ }
+    const err = new Error(message);
+    err.status = resp.status;
+    throw err;
+}
+
+// 创建一条"调整"复盘记录（编辑持仓时调用）：POST /api/clients/{id}/transactions，action='adjust'
+// 字段与"买入"记录保持一致（code/name/quantity/price/cost_price），仅前置标签为黄色"调整"。
+export async function createAdjustRecord(clientId, data) {
+    if (!clientId) return null;
+    try {
+        const resp = await fetch(`/api/clients/${encodeURIComponent(clientId)}/transactions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}`
+            },
+            body: JSON.stringify({ action: 'adjust', ...data })
+        });
+        if (resp.ok) return await resp.json();
+        console.warn('创建调整复盘记录失败:', resp.status, await resp.text().catch(() => ''));
+    } catch (e) {
+        console.warn('创建调整复盘记录异常:', e);
+    }
+    return null;
+}
+
 // 查询成本基础汇总（含未实现盈亏），支持 3 种成本法
 export async function fetchCostBasis(clientId, { method = 'average', code = null } = {}) {
     if (!clientId) return null;

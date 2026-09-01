@@ -279,7 +279,7 @@ export function renderPositionsTable(filter = 'all', portfolio) {
                 <button onclick="openAdjustModal('${p.code}', 'add')" class="px-2 py-1 text-xs font-medium text-up hover:bg-red-50 rounded-md transition-colors" title="加仓">加仓</button>
                 <button onclick="openAdjustModal('${p.code}', 'reduce')" class="px-2 py-1 text-xs font-medium text-down hover:bg-green-50 rounded-md transition-colors" title="减仓">减仓</button>
                 <button onclick="openPositionModal('${p.code}')" class="px-2 py-1 text-xs font-medium text-primary hover:bg-blue-50 rounded-md transition-colors" title="编辑">编辑</button>
-                <button onclick="deletePosition('${p.code}')" class="px-2 py-1 text-xs font-medium text-muted hover:bg-surface-strong rounded-md transition-colors" title="删除">删除</button>
+                <button onclick="revokePosition('${p.code}')" class="px-2 py-1 text-xs font-medium text-muted hover:bg-surface-strong rounded-md transition-colors" title="撤销">撤销</button>
                 ` : '<span class="text-xs text-muted-soft">只读</span>'}
             </td>
         </tr>

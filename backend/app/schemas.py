@@ -302,7 +302,7 @@ class TransactionCreate(BaseModel):
     """
     code: str = Field(..., min_length=1, max_length=16)
     name: Optional[str] = None
-    action: str = Field(..., pattern="^(buy|sell)$")
+    action: str = Field(..., pattern="^(buy|sell|adjust)$")
     quantity: int = Field(..., gt=0)
     price: float = Field(..., gt=0)
     cost_price: Optional[float] = None  # 交易时的成本价（卖出时用于计算已实现盈亏）
@@ -347,6 +347,7 @@ class TransactionOut(BaseModel):
     trade_date: str
     executed_at: Optional[datetime] = None
     audit_log_id: Optional[int] = None  # 关联的审计日志（人工调仓会有，种子/系统操作可能为空）
+    matched_lots: Optional[list] = None  # 卖出批次匹配明细（FIFO 记账用），买入/调整为空
     created_at: datetime
 
 
