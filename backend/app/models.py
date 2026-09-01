@@ -411,3 +411,32 @@ class AuditLog(Base):
     user_agent = Column(Text, nullable=True, comment="登录事件的浏览器 UA 快照；非登录通常为空")
     note = Column(String(256), nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
+
+
+class ModuleVisibility(Base):
+    """模块可见性覆盖表（配置驱动，无需改业务代码）。
+
+    - scope_type: 'role'（角色级） | 'account'（账户级/用户ID）
+    - scope_id:   角色名(role) 或 账户ID(user.id)
+    - module_key: 模块标识（见 module_permission_service.MODULE_REGISTRY）
+    - visible:    True=显示 / False=隐藏（覆盖默认规则）
+
+    解析优先级：账户级(account) > 角色级(role) > 代码默认(DEFAULT_HIDDEN_FOR_ROLE)。
+    未来要调整某角色/某账户的模块展示，仅通过配置或接口调用即可，无需改动业务代码。
+    """
+    __tablename__ = "module_visibility"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope_type = Column(String(16), nullable=False, comment="role | account")
+    scope_id = Column(String(64), nullable=False, comment="角色名 或 账户ID")
+    module_key = Column(String(48), nullable=False, comment="模块标识")
+    visible = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_type", "scope_id", "module_key",
+            name="uq_module_visibility_scope",
+        ),
+    )

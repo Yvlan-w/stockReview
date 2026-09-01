@@ -5,6 +5,7 @@ import { getUserPositions, saveUserPositions, getUserData, getCurrentClient } fr
 import { formatCurrency, formatNumber, getPnLColor, getSectorBadgeClass, getSectorBarColor } from '../core/formatters.js';
 import { marketDataState } from '../services/marketService.js';
 import { canEditClient } from '../permissions/access.js';
+import { isModuleVisible } from '../permissions/modules.js';
 import { getPrice, getPriceMap, updatePriceCache } from '../services/priceService.js';
 import { renderStrategySection } from './strategy.js';
 
@@ -551,6 +552,7 @@ export function renderCharts(pnlHistory, portfolio = null) {
 
 // --- 上证成交量图 ---
 export function renderVolumeChart() {
+    if (!isModuleVisible('index_turnover')) return;  // 角色/账户模块权限控制
     const volCtx = document.getElementById('volumeChart').getContext('2d');
 
     const volData = marketDataState.kline

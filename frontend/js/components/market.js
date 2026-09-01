@@ -5,6 +5,7 @@ import { marketDataState, fetchRealtimeMarketData, fetchShKlineData, fetchSector
 import { showToast } from '../core/ui.js';
 import { renderVolumeChart } from './overview.js';
 import { renderMarketTicker } from './workbench.js';
+import { isModuleVisible } from '../permissions/modules.js';
 
 // 当前选中的成交量图指数
 let selectedVolumeIndex = '1.000001';
@@ -20,6 +21,7 @@ function _formatAge(date) {
 }
 
 export function renderMarketOverview() {
+    if (!isModuleVisible('market_overview')) return;  // 角色/账户模块权限控制
     const m = marketDataState.realtime;
 
     // 时间与数据源徽标
@@ -148,17 +150,19 @@ export async function refreshMarket() {
     refreshBtn.disabled = true;
 
     // 并行发起，各自独立 try/catch
-    const klinePromise = fetchShKlineData(selectedVolumeIndex)
-        .then(k => {
-            marketDataState.kline = k;
-            renderVolumeChart();
-            return true;
-        })
-        .catch(err => {
-            console.warn('K线拉取失败，成交量图跳过:', err.message);
-            renderVolumeChart();
-            return false;
-        });
+    const klinePromise = isModuleVisible('index_turnover')
+        ? fetchShKlineData(selectedVolumeIndex)
+            .then(k => {
+                marketDataState.kline = k;
+                renderVolumeChart();
+                return true;
+            })
+            .catch(err => {
+                console.warn('K线拉取失败，成交量图跳过:', err.message);
+                renderVolumeChart();
+                return false;
+            })
+        : Promise.resolve(true);  // 模块隐藏：跳过拉取
 
     const realtimePromise = fetchRealtimeMarketData()
         .then(r => {
@@ -166,7 +170,7 @@ export async function refreshMarket() {
             marketDataState.source = 'real';
             marketDataState.lastUpdated = new Date();
             marketDataState.error = null;
-            renderMarketOverview();
+            if (isModuleVisible('market_overview')) renderMarketOverview();
             renderMarketTicker();
             return true;
         })
@@ -176,22 +180,24 @@ export async function refreshMarket() {
             if (!marketDataState.realtime) {
                 marketDataState.source = 'mock';
             }
-            renderMarketOverview();
+            if (isModuleVisible('market_overview')) renderMarketOverview();
             return false;
         });
 
-    const sectorPromise = fetchSectors(80)
-        .then(s => {
-            marketDataState.sectors = s;
-            renderSectorHeatmap();
-            return true;
-        })
-        .catch(err => {
-            console.warn('板块数据拉取失败:', err.message);
-            marketDataState.sectors = null;
-            renderSectorHeatmap();
-            return false;
-        });
+    const sectorPromise = isModuleVisible('sector_performance')
+        ? fetchSectors(80)
+            .then(s => {
+                marketDataState.sectors = s;
+                renderSectorHeatmap();
+                return true;
+            })
+            .catch(err => {
+                console.warn('板块数据拉取失败:', err.message);
+                marketDataState.sectors = null;
+                renderSectorHeatmap();
+                return false;
+            })
+        : Promise.resolve(true);  // 模块隐藏：跳过拉取
 
     const analysisPromise = fetchMarketAnalysis()
         .then(a => {
@@ -234,6 +240,7 @@ export async function refreshMarket() {
 // --- 板块表现 Treemap（行业板块，squarified 布局） ---
 // 面积 = 成交额（精确映射，使用平方根缩放减少极端值影响），颜色 = 涨跌幅
 export function renderSectorHeatmap() {
+    if (!isModuleVisible('sector_performance')) return;  // 角色/账户模块权限控制
     const container = document.getElementById('sectorHeatmap');
     const sectors = marketDataState.sectors;
 
@@ -737,6 +744,7 @@ export function renderDriverAnalysis() {
 
 // --- 指数成交量图切换 ---
 export function initVolumeChartTabs() {
+    if (!isModuleVisible('index_turnover')) return;  // 角色/账户模块权限控制
     const tabsContainer = document.getElementById('volumeChartTabs');
     if (!tabsContainer) return;
 

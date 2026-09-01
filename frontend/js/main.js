@@ -4,6 +4,7 @@
 import { setCurrentDate, initAdBanner, closeAdBanner } from './core/ui.js';
 import { loadClients, setCurrentClient, getFilteredClients } from './services/clientService.js';
 import { isWorkbenchVisible } from './permissions/access.js';
+import { loadModuleVisibility, applyModuleVisibility, isModuleVisible } from './permissions/modules.js';
 import {
     renderMarketTicker, renderClientList, refreshClientDetail,
     toggleWarnOnly, selectClient, addClientTag, removeClientTag,
@@ -114,6 +115,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 从后端加载客户（已按角色过滤），再渲染客户数据
     await loadClients();
+    // 拉取模块可见性配置（基于角色/账户），再统一应用页面模块显隐
+    await loadModuleVisibility();
+    applyModuleVisibility();
     renderMarketTicker();
     if (isWorkbenchVisible()) {
         renderClientList();
@@ -122,10 +126,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         refreshClientDetail();
     }
 
-    renderMarketOverview();       // 今日盯大盘（不依赖客户数据）
-    renderVolumeChart();          // 上证成交量图（先渲染模拟数据占位）
-    initVolumeChartTabs();        // 初始化成交量图切换按钮
-    renderSectorHeatmap();
+    // 以下三个大盘模块按「角色/账户模块权限」决定是否渲染（客服默认隐藏）
+    if (isModuleVisible('market_overview')) renderMarketOverview();       // 今日盯大盘（不依赖客户数据）
+    if (isModuleVisible('index_turnover')) {                             // 指数成交额
+        renderVolumeChart();          // 上证成交量图（先渲染模拟数据占位）
+        initVolumeChartTabs();        // 初始化成交量图切换按钮
+    }
+    if (isModuleVisible('sector_performance')) renderSectorHeatmap();
     fetchLiveNews();              // 加载实时资讯
 
     // 首屏渲染后再拉取东方财富实时数据

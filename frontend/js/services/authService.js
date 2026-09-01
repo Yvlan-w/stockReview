@@ -56,7 +56,7 @@ export function roleLabel(user) {
 }
 
 // ---- HTTP 基础请求 ----
-async function request(path, options = {}) {
+export async function request(path, options = {}) {
     const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
     const token = getToken();
     if (token) headers['Authorization'] = `Bearer ${token}`;

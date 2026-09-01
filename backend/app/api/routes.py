@@ -3,8 +3,9 @@ import csv
 import datetime as dt
 import io
 from typing import List, Optional
+from pydantic import BaseModel, Field
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
@@ -32,6 +33,7 @@ from ..services import market_analysis_service
 from ..services.adjust_service import execute_adjust, reverse_last_transaction, AdjustError, RevokeError
 from ..services import cost_basis_service
 from ..services.audit_service import log_user_activity
+from ..services import module_permission_service as mp_service
 
 router = APIRouter(prefix="/api")
 
@@ -1290,3 +1292,107 @@ def list_audit_logs(
              .limit(page_size)
              .all())
     return {"total": total, "items": items}
+
+
+# ==================== 模块可见性（板块 / 页面模块显隐） ====================
+class ModuleVisibilitySet(BaseModel):
+    scope_type: str = Field(..., pattern="^(role|account)$", description="'role' 或 'account'")
+    scope_id: str = Field(..., description="角色名 或 账户ID")
+    module_key: str = Field(..., description="模块标识（见模块注册表）")
+    visible: bool = Field(..., description="True=显示 / False=隐藏")
+
+
+@router.get("/modules/visible")
+def get_visible_modules(
+    role: Optional[str] = Query(default=None, description="指定角色查询其角色级可见性（不含账户覆盖）"),
+    account_id: Optional[str] = Query(default=None, description="指定账户查询其完整有效可见性"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """统一查询接口：按「角色或账户标识」返回可见 / 隐藏模块列表。
+
+    - 提供 account_id：返回该账户的完整有效可见性（账户级 > 角色级 > 默认）；
+    - 仅提供 role：返回该角色的角色级可见性；
+    - 都不提供：返回当前登录用户的完整有效可见性。
+    """
+    if account_id:
+        # 普通用户只能查自己；其余账户需管理员
+        if user.role != ROLE_ADMIN and str(user.id) != str(account_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权限查询该账户的模块可见性")
+        target = db.get(User, account_id)
+        if not target:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账户不存在")
+        eff_role, eff_account = target.role, account_id
+    elif role:
+        eff_role, eff_account = role, None
+    else:
+        eff_role, eff_account = user.role, str(user.id)
+
+    vis = mp_service.get_effective_visibility(db, eff_role, eff_account)
+    return {
+        "role": eff_role,
+        "account_id": eff_account,
+        "visible": [k for k, v in vis.items() if v],
+        "hidden": [k for k, v in vis.items() if not v],
+        "modules": [
+            {"key": m["key"], "name": m["name"], "category": m["category"], "visible": vis[m["key"]]}
+            for m in mp_service.MODULE_REGISTRY
+        ],
+    }
+
+
+@router.get("/modules")
+def list_modules(
+    user: User = Depends(require_roles(ROLE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """管理员视图：模块注册表 + 各角色默认矩阵 + 当前覆盖规则。"""
+    return {
+        "registry": mp_service.MODULE_REGISTRY,
+        "role_matrix": mp_service.get_role_matrix(db),
+        "overrides": mp_service.list_overrides(db),
+    }
+
+
+@router.post("/modules/visibility")
+def set_module_visibility(
+    body: ModuleVisibilitySet,
+    user: User = Depends(require_roles(ROLE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """设置某角色 / 某账户的模块可见性覆盖（upsert）。返回该 scope 的完整有效矩阵。"""
+    try:
+        mp_service.set_visibility(db, body.scope_type, body.scope_id, body.module_key, body.visible)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # 解析该 scope 视角下用于展示的 role（账户级用其真实 role），返回完整有效矩阵
+    if body.scope_type == mp_service.SCOPE_ACCOUNT:
+        acct = db.get(User, body.scope_id)
+        matrix_role = acct.role if acct else None
+        matrix_account = body.scope_id
+    else:
+        matrix_role = body.scope_id
+        matrix_account = None
+    matrix = mp_service.get_effective_visibility(db, matrix_role, matrix_account)
+    return {
+        "status": "ok",
+        "scope_type": body.scope_type,
+        "scope_id": body.scope_id,
+        "module_key": body.module_key,
+        "visible": body.visible,
+        "matrix": matrix,
+    }
+
+
+@router.delete("/modules/visibility")
+def reset_module_visibility(
+    scope_type: str = Query(..., pattern="^(role|account)$"),
+    scope_id: str = Query(...),
+    module_key: str = Query(...),
+    user: User = Depends(require_roles(ROLE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """重置某角色 / 某账户的模块可见性覆盖（恢复默认或回退到更低优先级规则）。"""
+    mp_service.reset_visibility(db, scope_type, scope_id, module_key)
+    return {"status": "ok", "scope_type": scope_type, "scope_id": scope_id, "module_key": module_key}
