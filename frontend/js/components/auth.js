@@ -16,6 +16,14 @@ let socket = null;
 // 标记位：避免 token 过期时并发请求同时触发多次强制登出 / 弹窗
 let _authExpiredHandling = false;
 
+// 通知全局：登录身份已变化（登录成功 / 登出 / 被踢 / 注销），
+// 由 main.js 监听并重新计算「模块可见性」与重建大盘模块（解决切换账号后显隐未刷新）。
+function _notifyIdentityChanged() {
+    try {
+        window.dispatchEvent(new CustomEvent('auth:identity-changed'));
+    } catch { /* ignore */ }
+}
+
 // ---- 权限驱动界面可见性 ----
 function applyAccessControl() {
     const visible = isWorkbenchVisible();
@@ -132,6 +140,7 @@ export async function handleLogin(event) {
         // 登录成功后自动关闭身份弹窗，避免遮挡导航栏铃铛
         const modal = document.getElementById('identityModal');
         if (modal) { modal.classList.add('hidden'); document.body.style.overflow = ''; }
+        _notifyIdentityChanged();   // 身份变化：通知 main.js 重新计算模块可见性并重建大盘
     } catch (e) {
         const msg = (e.message || '未知错误').toString();
         // 把"账户到期请联系管理员续费"这条区分出来单独 toast（红色 + 提示条），
@@ -163,6 +172,7 @@ export async function handleLogout() {
     await loadClients();  // 清空内存中的客户数据（已退出登录）
     applyAccessControl();
     hideNotificationPanel();
+    _notifyIdentityChanged();   // 身份变化：通知 main.js 重新计算模块可见性
     showToast('已退出登录', 'success');
 }
 
@@ -195,6 +205,7 @@ function handleAuthExpired(event) {
     } else {
         showToast('登录已过期，请重新登录', 'error', 8000);
     }
+    _notifyIdentityChanged();   // 身份变化：通知 main.js 重新计算模块可见性并重建大盘
 }
 
 // ---- 普通用户自助注销账户（软删除）----
@@ -236,6 +247,7 @@ export async function handleDeleteSelfAccount() {
     // 关闭身份管理弹窗（避免遮挡）
     const modal = document.getElementById('identityModal');
     if (modal) { modal.classList.add('hidden'); document.body.style.overflow = ''; }
+    _notifyIdentityChanged();   // 身份变化：通知 main.js 重新计算模块可见性
     showToast('✅ 账户已注销成功，欢迎下次使用', 'success', 6000);
 }
 

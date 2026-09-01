@@ -107,6 +107,30 @@ function setupNavScrollSpy() {
     onScroll();
 }
 
+// ---- 大盘模块渲染（按模块可见性权限）----
+// 抽成函数，供「首屏」与「切换账号」复用：切换账号后需重新计算可见性并重建内容
+// （隐藏时渲染函数会提前返回、内容为空；切换到可见身份时必须重建并拉取数据）。
+function renderMarketModules() {
+    if (isModuleVisible('market_overview')) renderMarketOverview();       // 今日盯大盘（不依赖客户数据）
+    if (isModuleVisible('index_turnover')) {                             // 指数成交额
+        renderVolumeChart();          // 上证成交量图（先渲染模拟数据占位）
+        initVolumeChartTabs();        // 初始化成交量图切换按钮
+    }
+    if (isModuleVisible('sector_performance')) renderSectorHeatmap();
+    // 任一可见时才拉取实时数据（隐藏态跳过可省流量与无用渲染）
+    if (isModuleVisible('market_overview') || isModuleVisible('index_turnover') || isModuleVisible('sector_performance')) {
+        refreshMarket();
+    }
+}
+
+// 切换账号（登录成功 / 登出 / 被踢）后，重新拉取并应用模块可见性，再重建大盘模块。
+// 通过事件解耦：auth.js 在身份变化时派发 auth:identity-changed，无需直接依赖 market 模块。
+window.addEventListener('auth:identity-changed', () => {
+    loadModuleVisibility()
+        .then(() => { applyModuleVisibility(); renderMarketModules(); })
+        .catch(() => { applyModuleVisibility(); renderMarketModules(); });
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
     setCurrentDate();
     initAdBanner();
@@ -127,16 +151,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // 以下三个大盘模块按「角色/账户模块权限」决定是否渲染（客服默认隐藏）
-    if (isModuleVisible('market_overview')) renderMarketOverview();       // 今日盯大盘（不依赖客户数据）
-    if (isModuleVisible('index_turnover')) {                             // 指数成交额
-        renderVolumeChart();          // 上证成交量图（先渲染模拟数据占位）
-        initVolumeChartTabs();        // 初始化成交量图切换按钮
-    }
-    if (isModuleVisible('sector_performance')) renderSectorHeatmap();
+    renderMarketModules();
     fetchLiveNews();              // 加载实时资讯
-
-    // 首屏渲染后再拉取东方财富实时数据
-    setTimeout(() => refreshMarket(), 300);
 
     // 交易时段（09:15-15:05 CST）每 30 秒自动刷新
     const marketRefreshInterval = setInterval(() => {

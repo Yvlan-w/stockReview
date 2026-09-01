@@ -747,6 +747,9 @@ export function initVolumeChartTabs() {
     if (!isModuleVisible('index_turnover')) return;  // 角色/账户模块权限控制
     const tabsContainer = document.getElementById('volumeChartTabs');
     if (!tabsContainer) return;
+    // 已绑定则跳过：切换账号重复加载可见性时会再次调用本函数，避免重复绑定单击监听
+    if (tabsContainer.dataset.volTabsBound === '1') return;
+    tabsContainer.dataset.volTabsBound = '1';
 
     tabsContainer.addEventListener('click', async (e) => {
         const btn = e.target.closest('.index-vol-tab');
