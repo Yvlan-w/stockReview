@@ -229,7 +229,7 @@ function renderTimeline(transactions) {
         </div>`;
     }
     const rows = transactions.map(renderTradeRow);
-    const THRESHOLD = 5;
+    const THRESHOLD = 4;
     if (rows.length <= THRESHOLD) {
         return rows.join('');
     }
