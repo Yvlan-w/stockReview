@@ -6,6 +6,8 @@ import { formatCurrency, formatNumber, getPnLColor } from '../core/formatters.js
 import { SECTORS } from '../core/config.js';
 import { showToast, hideToast } from '../core/ui.js';
 import { refreshAll, refreshRealtime } from './overview.js';
+import { renderClientProfile } from './workbench.js';
+import { refreshClientSummaries } from './workbench.js';
 import { canEditClient } from '../permissions/access.js';
 import { fetchTradingFees } from './feeSettings.js';
 import { getPrice, setPrice } from '../services/priceService.js';
@@ -995,6 +997,10 @@ export async function executeAdjust(code, action) {
     const portfolio = await fetchClientPortfolio(currentClient.id);
     const pnlHistory = await fetchClientPnlHistory(currentClient.id);
     refreshAll(portfolio, pnlHistory);
+    // 同步刷新客户名片（与持仓概览同源，确保总资产/持仓盈亏数值一致）
+    renderClientProfile(portfolio);
+    // 同步刷新客户列表右侧金额（后端实时盈亏摘要），保证调仓后列表金额立即更新
+    await refreshClientSummaries().catch(() => {});
 }
 
 // --- 保存持仓（新增或编辑）---
@@ -1058,6 +1064,8 @@ export async function savePosition(originalCode = null) {
         // ---- 即时刷新（<1s）：事务后组合数据同步内存态并重渲染 ----
         syncClientState(result.portfolio);
         refreshRealtime(result.portfolio);
+        // 同步刷新客户名片（与持仓概览同源，确保总资产/持仓盈亏数值一致）
+        renderClientProfile(result.portfolio);
 
         // ---- 异步校准：并行拉取组合估值与盈亏历史，更新图表 ----
         try {
@@ -1068,6 +1076,10 @@ export async function savePosition(originalCode = null) {
             if (portfolio) {
                 syncClientState(portfolio);
                 refreshAll(portfolio, pnlHistory);
+                // 同步刷新客户名片（与持仓概览同源，确保总资产/持仓盈亏数值一致）
+                renderClientProfile(portfolio);
+                // 同步刷新客户列表右侧金额（后端实时盈亏摘要）
+                await refreshClientSummaries().catch(() => {});
             }
         } catch (e) {
             console.warn('新建持仓后数据校准失败:', e);
@@ -1149,6 +1161,10 @@ export async function revokePosition(code) {
             if (portfolio) {
                 syncClientState(portfolio);
                 refreshAll(portfolio, pnlHistory);
+                // 同步刷新客户名片（与持仓概览同源，确保总资产/持仓盈亏数值一致）
+                renderClientProfile(portfolio);
+                // 同步刷新客户列表右侧金额（后端实时盈亏摘要）
+                await refreshClientSummaries().catch(() => {});
             } else {
                 refreshAll();
             }

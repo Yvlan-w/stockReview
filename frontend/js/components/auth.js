@@ -60,11 +60,11 @@ function applyAccessControl() {
 }
 
 // 按当前角色重新渲染客户列表与详情
-function renderWorkspaceData() {
+async function renderWorkspaceData() {
     if (!isWorkbenchVisible()) return;
+    // 先拉取后端实时盈亏摘要，确保列表首屏即渲染正确金额（不依赖选中客户）
+    await refreshClientSummaries().catch(() => {});
     renderClientList();
-    // 异步拉取客户盈亏摘要（后台加载，结果就绪后自动刷新列表盈亏显示）
-    refreshClientSummaries().catch(() => {});
     const first = getFilteredClients()[0];
     setCurrentClient(first ? first.id : null);
     refreshClientDetail();

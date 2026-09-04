@@ -4,7 +4,7 @@
 import { ADVISOR_POOL, SERVICE_STAFF_POOL } from '../core/config.js';
 import { getVisibleClients } from '../permissions/access.js';
 import { fetchClients, updateClient, updateClientPositions, isLoggedIn } from './authService.js';
-import { getPriceMap } from './priceService.js';
+import { getPriceMap, getPrice } from './priceService.js';
 
 // 分享版注入数据：由 index.html 内联脚本挂载到 window，导出分享版时会被替换为真实数据。
 const EMBEDDED_POSITIONS = window.EMBEDDED_POSITIONS;
@@ -18,6 +18,9 @@ export let clientTagEditId = null;
 
 // ---- 组合估值 & 盈亏历史 实时数据 ----
 export let portfolioData = null;
+// portfolioData 归属的客户 id（PortfolioOut 不含 client_id，需前端标记），
+// 供 renderClientProfile 等组件判断「当前实时组合数据是否属于当前客户」。
+export let portfolioClientId = null;
 export let pnlHistoryData = null;
 
 // ---- 客户盈亏摘要（客户列表批量实时数据）----
@@ -69,6 +72,71 @@ export function clientSummaryStats(client) {
     };
 }
 
+// 客户实时资产/盈亏：与「持仓概览」(renderStatsCards) 完全一致的数据口径。
+// 优先取当前客户已加载的 portfolioData（同源 /api/clients/{id}/portfolio，即概览所读对象）；
+// 否则降级 clientSummaryStats（批量实时摘要，同源 pnl_service）；再无则 clientStats。
+// 三者最终都来自后端实时估值，确保「客户名片」与「持仓概览」的总资产/持仓盈亏数值零差异。
+export function clientRealtimeStats(client) {
+    if (portfolioData && portfolioClientId === client?.id) {
+        return {
+            totalAssets: portfolioData.totalAssets,
+            totalPnl: portfolioData.totalPnl,
+            totalPnlPct: portfolioData.totalPnlPct,
+            isRealtime: true,
+        };
+    }
+    const ss = clientSummaryStats(client);
+    return {
+        totalAssets: ss.totalAssets,
+        totalPnl: ss.totalPnl,
+        totalPnlPct: ss.totalPnlPct,
+        isRealtime: ss.isRealtime,
+    };
+}
+
+// 组合估值/盈亏的【单一计算入口】：与「持仓概览」renderStatsCards 完全一致的口径。
+// 客户名片（renderClientProfile）与持仓概览（renderStatsCards）共用此函数，
+// 保证「总资产 / 持仓盈亏 / 收益率」两处数值零差异——无论走实时 portfolio 还是本地降级。
+//   - portfolio 为后端 /api/clients/{id}/portfolio 返回对象时，直接采用其 totalAssets/totalPnl/totalPnlPct；
+//   - 为 null（实时未就绪）时，降级为本地估算（与 renderStatsCards 的降级分支逐行一致）。
+export function computePortfolioStats(portfolio) {
+    if (portfolio) {
+        return {
+            totalMarketValue: portfolio.totalMarketValue || 0,
+            totalCost: portfolio.totalCost || 0,
+            totalPnl: portfolio.totalPnl || 0,
+            totalPnlPct: portfolio.totalPnlPct || 0,
+            availableCash: portfolio.availableCash || 0,
+            totalAssets: portfolio.totalAssets || 0,
+            todayPnl: portfolio.todayPnl || 0,
+            todayPnlPct: portfolio.todayPnlPct || 0,
+        };
+    }
+    const positions = getUserPositions();
+    let totalMarketValue = 0, totalCost = 0;
+    positions.forEach(p => {
+        totalMarketValue += getPrice(p.code, p.costPrice) * p.quantity;
+        totalCost += p.costPrice * p.quantity;
+    });
+    const totalPnl = totalMarketValue - totalCost;
+    const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
+    const availableCash = getUserData().availableCash || 0;
+    const totalAssets = totalMarketValue + availableCash;
+    const todayPnl = getUserData().todayPnl || totalPnl * 0.05;
+    const todayPnlPct = totalAssets > 0 ? (todayPnl / (totalAssets - todayPnl)) * 100 : 0;
+    return {
+        totalMarketValue, totalCost, totalPnl, totalPnlPct,
+        availableCash, totalAssets, todayPnl, todayPnlPct,
+    };
+}
+
+// 将事务后/刷新后的组合数据同步到模块级内存态（portfolioData / portfolioClientId），
+// 供客户名片等组件读取，确保其与持仓概览（renderStatsCards 同对象）同源、数值一致。
+export function assignPortfolio(portfolio, clientId = null) {
+    portfolioData = portfolio;
+    if (clientId) portfolioClientId = clientId;
+}
+
 // 后端返回的客户字段（snake_case）→ 前端渲染字段（camelCase）
 function mapClient(raw) {
     return {
@@ -99,6 +167,7 @@ export async function fetchClientPortfolio(id) {
         });
         if (resp.ok) {
             portfolioData = await resp.json();
+            portfolioClientId = id;  // 标记归属当前客户
             return portfolioData;
         }
     } catch (e) {
@@ -502,12 +571,15 @@ export function getFilteredClients() {
         return matchQ && matchRisk && matchWarn && matchAdvisor && matchService;
     });
     list.sort((a, b) => {
-        const sa = clientStats(a), sb = clientStats(b);
+        // 排序统一使用「后端实时盈亏摘要」(clientSummaryStats)，与列表展示口径完全一致；
+        // 若改用 clientStats（依赖全局价格缓存），选中客户后 refreshClientDetail 会经
+        // updatePriceCache 写入该客户实时价，导致仅选中客户的排序键变化、整列顺序漂移。
+        const sa = clientSummaryStats(a), sb = clientSummaryStats(b);
         switch (sort) {
             case 'assets-desc': return sb.totalAssets - sa.totalAssets;
             case 'assets-asc': return sa.totalAssets - sb.totalAssets;
-            case 'pnl-desc': return sb.totalPnl - sa.totalPnl;
-            case 'pnl-asc': return sa.totalPnl - sb.totalPnl;
+            case 'pnl-desc': return sb.floatingPnl - sa.floatingPnl;
+            case 'pnl-asc': return sa.floatingPnl - sb.floatingPnl;
             default: return sb.totalAssets - sa.totalAssets;
         }
     });

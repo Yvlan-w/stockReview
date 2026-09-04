@@ -6,7 +6,7 @@ import { loadClients, setCurrentClient, getFilteredClients } from './services/cl
 import { isWorkbenchVisible } from './permissions/access.js';
 import { loadModuleVisibility, applyModuleVisibility, isModuleVisible } from './permissions/modules.js';
 import {
-    renderMarketTicker, renderClientList, refreshClientDetail,
+    renderMarketTicker, renderClientList, refreshClientDetail, refreshClientSummaries,
     toggleWarnOnly, selectClient, addClientTag, removeClientTag,
     exportClientReport, updateClientNote, evaluateClientRisk, handleAlertStatus,
     openClientEditModal, closeClientEditModal, submitClientEdit,
@@ -144,6 +144,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyModuleVisibility();
     renderMarketTicker();
     if (isWorkbenchVisible()) {
+        // 先拉取后端实时盈亏摘要，确保列表首屏即渲染正确金额（不依赖选中客户）
+        await refreshClientSummaries().catch(() => {});
         renderClientList();
         const firstClient = getFilteredClients()[0];
         setCurrentClient(firstClient ? firstClient.id : null);

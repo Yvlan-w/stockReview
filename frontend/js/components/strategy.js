@@ -14,13 +14,25 @@ const MARKET_LABEL = {
     SH: '沪', SZ: '深', BJ: '北', HK: '港', US: '美',
 };
 
-// 格式化数据库时间戳 executed_at → YYYY-MM-DD HH:mm:ss
+// 格式化数据库时间戳 executed_at → YYYY-MM-DD HH:mm:ss（统一东八区 UTC+8）
+// 后端以零时区（UTC，无时区标记的 naive 字符串，如 2026-09-04T06:23:08）存储并返回；
+// 必须先将其显式按 UTC 解释（补 Z），否则 new Date() 会把无时区字符串当作「本地时间」解析，
+// 在 UTC+8 浏览器中 +8h 偏移被抵消、最终显示回零时区（UTC）墙钟时间（即本模块曾出现的 bug）。
+// 修正后：按 UTC 解析 → 整体 +8h → 读取 UTC 组件，得到稳定的东八区展示值，不受浏览器时区影响。
 function formatDateTime(dt) {
     if (!dt) return '—';
-    const d = new Date(dt);
+    let iso = String(dt).trim();
+    // 无时区标记（既无 Z 也无 ±HH:MM 偏移）→ 视为 UTC，补 Z 以强制按零时区解析
+    if (!/[zZ]$/.test(iso) && !/[+\-]\d{2}:?\d{2}$/.test(iso)) {
+        iso = iso.replace(' ', 'T');
+        if (!/[zZ]$/.test(iso)) iso += 'Z';
+    }
+    const d = new Date(iso);
     if (isNaN(d.getTime())) return String(dt).slice(0, 19).replace('T', ' ');
+    // 将 UTC 即时时刻整体 +8h，再取 UTC 组件 → 稳定东八区（UTC+8）展示，不受浏览器本地时区影响
+    const d8 = new Date(d.getTime() + 8 * 3600 * 1000);
     const pad = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    return `${d8.getUTCFullYear()}-${pad(d8.getUTCMonth()+1)}-${pad(d8.getUTCDate())} ${pad(d8.getUTCHours())}:${pad(d8.getUTCMinutes())}:${pad(d8.getUTCSeconds())}`;
 }
 
 // 计算策略统计 4 张卡片（真实口径）

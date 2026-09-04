@@ -1,7 +1,7 @@
 // ============================================================
 // 总览组件：统计卡片 / 持仓表格 / 图表 / 行业集中度 / 成交量
 // ============================================================
-import { getUserPositions, saveUserPositions, getUserData, getCurrentClient } from '../services/clientService.js';
+import { getUserPositions, saveUserPositions, getUserData, getCurrentClient, computePortfolioStats, assignPortfolio } from '../services/clientService.js';
 import { formatCurrency, formatNumber, getPnLColor, getSectorBadgeClass, getSectorBarColor } from '../core/formatters.js';
 import { marketDataState } from '../services/marketService.js';
 import { canEditClient } from '../permissions/access.js';
@@ -70,40 +70,17 @@ export function renderSectorConcentration(portfolio = null) {
 }
 
 // --- 统计卡片 ---
+// 与「客户名片」renderClientProfile 共用 computePortfolioStats，确保总资产/持仓盈亏数值完全一致
 export function renderStatsCards(portfolio) {
-    let totalMarketValue = 0;
-    let totalCost = 0;
-    let totalPnL = 0;
-    let totalPnLPct = 0;
-    let availableCash = 0;
-    let totalAssets = 0;
-    let todayPnL = 0;
-    let todayPnLPct = 0;
-
-    if (portfolio) {
-        // 使用后端实时数据
-        totalMarketValue = portfolio.totalMarketValue || 0;
-        totalCost = portfolio.totalCost || 0;
-        totalPnL = portfolio.totalPnl || 0;
-        totalPnLPct = portfolio.totalPnlPct || 0;
-        availableCash = portfolio.availableCash || 0;
-        totalAssets = portfolio.totalAssets || 0;
-        todayPnL = portfolio.todayPnl || 0;
-        todayPnLPct = portfolio.todayPnlPct || 0;
-    } else {
-        // 降级：实时价格服务（缓存 → 成本价兜底）
-        const positions = getUserPositions();
-        positions.forEach(p => {
-            totalMarketValue += getPrice(p.code, p.costPrice) * p.quantity;
-            totalCost += p.costPrice * p.quantity;
-        });
-        totalPnL = totalMarketValue - totalCost;
-        totalPnLPct = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
-        availableCash = getUserData().availableCash || 0;
-        totalAssets = totalMarketValue + availableCash;
-        todayPnL = getUserData().todayPnL || totalPnL * 0.05;
-        todayPnLPct = totalAssets > 0 ? (todayPnL / (totalAssets - todayPnL)) * 100 : 0;
-    }
+    const s = computePortfolioStats(portfolio);
+    const totalMarketValue = s.totalMarketValue;
+    const totalCost = s.totalCost;
+    const totalPnL = s.totalPnl;
+    const totalPnLPct = s.totalPnlPct;
+    const availableCash = s.availableCash;
+    const totalAssets = s.totalAssets;
+    const todayPnL = s.todayPnl;
+    const todayPnLPct = s.todayPnlPct;
 
     const cards = [
         {
@@ -634,6 +611,8 @@ export async function refreshAll(portfolio, pnlHistory) {
 // 直接使用接口返回的事务后组合数据渲染，配合 syncClientState 实现秒级刷新
 export function refreshRealtime(portfolio) {
     if (!portfolio) return;
+    // 同步模块级内存态，使「客户名片」(renderClientProfile 读 portfolioData) 与「持仓概览」同源一致
+    assignPortfolio(portfolio, getCurrentClient()?.id);
     currentPortfolio = portfolio;
     updatePriceCache(portfolio);
     renderStatsCards(portfolio);

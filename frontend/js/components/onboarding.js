@@ -9,7 +9,7 @@ import { RISK_LEVELS } from '../core/config.js';
 import { canCreateClient, isService } from '../permissions/access.js';
 import { getUser, fetchUserOptions, createClient } from '../services/authService.js';
 import { loadClients } from '../services/clientService.js';
-import { renderClientList, refreshClientDetail } from './workbench.js';
+import { renderClientList, refreshClientDetail, refreshClientSummaries } from './workbench.js';
 
 const OVERLAY_ID = 'onboardingOverlay';
 let wizStep = 0;
@@ -315,6 +315,8 @@ export async function submitOnboarding() {
         document.getElementById('onboardingFooter').innerHTML = `<button onclick="closeOnboarding()" class="w-full px-4 py-3 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-xl transition-colors">完成</button>`;
         showToast('✅ 客户账户创建成功', 'success');
         await loadClients();
+        // 新客户加入后重新拉取实时摘要，确保新客户行也显示正确金额（而非成本价估算）
+        await refreshClientSummaries().catch(() => {});
         renderClientList();
         refreshClientDetail();
     } catch (e) {

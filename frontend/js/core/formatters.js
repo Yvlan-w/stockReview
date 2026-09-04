@@ -88,6 +88,25 @@ export function fmtMoney(v) {
     return (neg ? '-' : '') + '¥' + abs.toFixed(0);
 }
 
+// 客户名片（工作台）金额统一格式 —— 总资产 / 持仓盈亏 共用，避免重复代码
+//   |值| ≥ 10000 → 以「万」为单位（原值 ÷ 10000，保留 1 位小数并去掉末尾多余的 0），后接「万」；
+//   |值| < 10000 → 保持原有展示形式：¥ + 千分位 + 2 位小数。
+// 正负号始终保留：亏损显示 -¥1.2万，不使用绝对值或括号替代；符号统一置于货币符号之前。
+// sign=true 时为非负数补 '+' 号——「持仓盈亏」沿用原有 + 号惯例（0 显示为 +¥0.00）。
+// 与既有 fmtMoney（客户列表在用，含「亿」档）相互独立，互不影响，避免改动其它字段。
+export function formatCompactAmount(value, { sign = false } = {}) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    const abs = Math.abs(n);
+    // 数值部分一律基于绝对值生成，符号在返回时统一前置，保证是 -¥1.2万 而非 ¥-1.2万
+    const amount = abs >= 10000
+        // Number(...) 自动去掉末尾多余的 0：1.0 → "1"，1.2 → "1.2"，12345.7 → "12345.7"
+        ? `${Number((abs / 10000).toFixed(1))}万`
+        : formatCurrency(abs); // 千分位 + 2 位小数
+    if (n < 0) return `-¥${amount}`;
+    return sign ? `+¥${amount}` : `¥${amount}`;
+}
+
 // 去除 HTML 标签
 export function stripHtml(html) {
     const tmp = document.createElement('div');

@@ -6,9 +6,9 @@ import {
     setCurrentClient, setClientWarnOnly, getCurrentClient, clientStats, clientRiskAlerts,
     getFilteredClients, getClientRelations, updateClientRemote, getUserPositions,
     fetchClientPortfolio, fetchClientPnlHistory, portfolioData, pnlHistoryData,
-    clientSummaries, summariesLoading, clientSummaryStats, fetchClientSummaries,
+    clientSummaries, summariesLoading, clientSummaryStats, computePortfolioStats, fetchClientSummaries,
 } from '../services/clientService.js';
-import { fmtMoney } from '../core/formatters.js';
+import { fmtMoney, formatCompactAmount } from '../core/formatters.js';
 import { RISK_BADGE, ALL_MANAGED_TAGS } from '../core/config.js';
 import { showToast } from '../core/ui.js';
 import { marketDataState } from '../services/marketService.js';
@@ -150,8 +150,6 @@ export async function selectClient(id) {
 
 // --- 客户详情刷新（资料 + 风险 + 统计 + 持仓 + 图表） ---
 export async function refreshClientDetail() {
-    renderClientProfile();
-    
     // 并行加载实时数据
     const c = getCurrentClient();
     if (c) {
@@ -162,7 +160,9 @@ export async function refreshClientDetail() {
         // 更新实时价格缓存（供弹窗/策略等组件降级使用）
         updatePriceCache(portfolioData);
     }
-    
+
+    // 名片与概览均基于同一份实时 portfolioData 渲染，确保总资产/持仓盈亏数值完全一致
+    renderClientProfile();
     renderRiskAlerts();
     renderStatsCards(portfolioData);
     renderPositionsTable('all', portfolioData);
@@ -177,13 +177,16 @@ export async function refreshClientDetail() {
 }
 
 // --- 客户资料卡 ---
-export function renderClientProfile() {
+// portfolio 缺省取模块级 portfolioData；显式传入时（如调仓后）与持仓概览共用同一对象。
+// 通过 computePortfolioStats 与「持仓概览」(renderStatsCards) 共用同一计算入口，
+// 保证「总资产 / 持仓盈亏」两处数值完全一致、零差异。
+export function renderClientProfile(portfolio = portfolioData) {
     const el = document.getElementById('clientProfileCard');
     if (!el) return;
     el.classList.remove('animate-pulse');
     const c = getCurrentClient();
     if (!c) { el.innerHTML = ''; return; }
-    const s = clientStats(c);
+    const s = computePortfolioStats(portfolio);
     const rel = getClientRelations(c);
     const pnlColor = s.totalPnl >= 0 ? 'text-up' : 'text-down';
     const canManage = canCreateClient();
@@ -220,14 +223,17 @@ export function renderClientProfile() {
             </div>
             <div class="ml-auto w-full sm:w-auto flex flex-col items-stretch sm:items-end gap-3">
                 <!-- 第一行：总资产 + 持仓盈亏 卡片 -->
+                <!-- 两处金额统一走 formatCompactAmount：|值|≥10000 用「万」（1 位小数、去尾 0），
+                     否则保持 ¥ + 千分位 + 2 位小数；负值保留负号（-¥1.2万）。
+                     whitespace-nowrap 保证数值不换行、不溢出、两卡片宽度稳定不错位 -->
                 <div class="flex items-center gap-5 justify-end flex-wrap">
                     <div class="text-right">
                         <div class="text-xs text-muted">总资产</div>
-                        <div class="font-mono text-2xl font-semibold text-ink">${fmtMoney(s.totalAssets)}</div>
+                        <div class="font-mono text-2xl font-semibold text-ink whitespace-nowrap">${formatCompactAmount(s.totalAssets)}</div>
                     </div>
                     <div class="text-right">
                         <div class="text-xs text-muted">持仓盈亏</div>
-                        <div class="font-mono text-2xl font-semibold ${pnlColor}">${s.totalPnl >= 0 ? '+' : ''}${fmtMoney(s.totalPnl)} <span class="text-sm">(${s.totalPnlPct >= 0 ? '+' : ''}${s.totalPnlPct.toFixed(1)}%)</span></div>
+                        <div class="font-mono text-2xl font-semibold ${pnlColor} whitespace-nowrap">${formatCompactAmount(s.totalPnl, { sign: true })}</div>
                     </div>
                 </div>
                 <!-- 第二行：编辑客户 + 导出客户报告 按钮（右对齐） -->
