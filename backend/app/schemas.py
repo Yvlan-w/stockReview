@@ -401,3 +401,37 @@ class AuditLogOut(BaseModel):
 class AuditLogPage(BaseModel):
     total: int
     items: List[AuditLogOut]
+
+
+# ---- 持仓体检报告（导出客户报告） ----
+class HoldingInput(BaseModel):
+    """单只持仓（用于报告生成）。代码必填，其余缺失时由适配器补全。"""
+    code: str = Field(..., min_length=1, max_length=16)
+    name: Optional[str] = None
+    sector: Optional[str] = None
+    quantity: float = Field(..., gt=0)          # 持仓数量（>0；A股为整数，但保留 float 以兼容基金/分红拆细）
+    cost_price: Optional[float] = Field(None, gt=0)
+    current_price: Optional[float] = Field(None, gt=0)
+
+
+class PortfolioHealthRequest(BaseModel):
+    """持仓体检报告请求。
+
+    - ``holdings``：直接传入持仓（不写死，由调用方决定分析哪几只）；
+    - ``client_id``：传入则忽略 ``holdings``，自动取该客户的真实持仓；
+    - ``adapter``：``demo``（离线确定性，默认）/ ``public``（公开 API，云端可用）；
+    - ``use_llm``：是否尝试调用外部大模型叙事（未配置时自动回落启发式）；
+    - ``title``：报告标题（缺省为"持仓体检报告"）。
+    """
+    holdings: List[HoldingInput] = []
+    adapter: str = "demo"                       # "demo" | "public"
+    use_llm: bool = False
+    client_id: Optional[str] = None
+    title: Optional[str] = None
+
+
+class PortfolioHealthResponse(BaseModel):
+    meta: Dict[str, Any]
+    stocks: List[Dict[str, Any]]
+    portfolio: Dict[str, Any]
+    narrative: Dict[str, Any]

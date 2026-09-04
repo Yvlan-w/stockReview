@@ -23,7 +23,7 @@ function escapeHtml(s) {
 import { renderStatsCards, renderPositionsTable, renderCharts, renderSectorConcentration } from './overview.js';
 import { renderStrategySection } from './strategy.js';
 import { canEditClient, canHandleAlerts, canCreateClient } from '../permissions/access.js';
-import { fetchClientAlerts, updateAlertStatus, evaluateRisk } from '../services/authService.js';
+import { fetchClientAlerts, updateAlertStatus, evaluateRisk, getToken } from '../services/authService.js';
 import { initTagSelector, renderTagSelector, getSelectedManagedTags } from './tagSelector.js';
 
 // --- 市场环境横条 ---
@@ -633,72 +633,76 @@ export async function removeClientTag(tag) {
     }
 }
 
-// --- 导出客户报告（独立 HTML，可 Ctrl+P 转 PDF） ---
-export function exportClientReport() {
+// --- 导出客户报告（持仓体检 / 导出客户报告模块）---
+// 实现要点（按需求）：
+//  1. 不写死股票 —— 直接把当前客户的 client_id 交给后端，由后端拉取该客户「真实持仓」；
+//  2. 数据来源走公开 API（adapter='public'，云端可用；如需离线演示可改 'demo'）；
+//  3. 后端返回自包含 HTML（内联 SVG，涨红跌绿），前端开新窗口写入并自动触发打印（可另存为 PDF）。
+export async function exportClientReport() {
     const c = getCurrentClient();
-    if (!c) return;
-    const s = clientStats(c);
-    const alerts = clientRiskAlerts(c);
-    const pnlColor = s.totalPnl >= 0 ? '#cf202f' : '#05b169';
-    const rows = (c.positions || []).map(p => {
-        const livePrice = getPrice(p.code, p.costPrice);
-        const pnl = (livePrice - p.costPrice) * p.quantity;
-        const pnlPct = (livePrice - p.costPrice) / p.costPrice * 100;
-        const color = pnl >= 0 ? '#cf202f' : '#05b169';
-        return `<tr>
-            <td>${p.name}</td><td>${p.code}</td><td>${p.sector}</td>
-            <td>${p.quantity.toLocaleString()}</td><td>${p.costPrice.toFixed(2)}</td><td>${livePrice.toFixed(2)}</td>
-            <td style="color:${color}">${pnl >= 0 ? '+' : ''}${(pnl / 10000).toFixed(2)}万</td>
-            <td style="color:${color}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</td>
-        </tr>`;
-    }).join('');
-    const alertHtml = alerts.length
-        ? alerts.map(a => `<li>${a.title}：${a.desc}</li>`).join('')
-        : '<li>无重大风险</li>';
-    const dateStr = new Date().toLocaleDateString('zh-CN');
-    const report = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>${c.name} 客户持仓报告</title>
-    <style>
-        body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#0a0b0d;margin:0;padding:32px;background:#fff}
-        h1{font-size:22px;margin:0 0 4px} h2{font-size:15px;margin:24px 0 8px;border-left:4px solid #0052ff;padding-left:8px}
-        .meta{color:#5b616e;font-size:13px;margin-bottom:16px}
-        .stats{display:flex;gap:12px;margin:12px 0;flex-wrap:wrap}
-        .stat{flex:1;min-width:140px;border:1px solid #eceef1;border-radius:12px;padding:12px}
-        .stat .v{font-size:18px;font-weight:600;font-family:ui-monospace,monospace}
-        .stat .l{font-size:12px;color:#7c828a;margin-top:2px}
-        table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
-        th,td{padding:8px 10px;border-bottom:1px solid #eef0f3;text-align:right}
-        th:first-child,td:first-child{text-align:left}
-        th{background:#f7f7f7;color:#5b616e;font-weight:600}
-        .alert{background:#fdf0f0;border:1px solid #f5c6c6;border-radius:10px;padding:10px 14px;font-size:13px;color:#a01320}
-        .ok{background:#f0faf4;border:1px solid #bfe8cf;border-radius:10px;padding:10px 14px;font-size:13px;color:#0a7a44}
-        .note{background:#f7f7f7;border-radius:10px;padding:12px;font-size:13px;color:#5b616e}
-        .footer{margin-top:28px;font-size:11px;color:#a8acb3;border-top:1px solid #eef0f3;padding-top:12px}
-        @media print{body{padding:16px}}
-    </style></head><body>
-        <h1>客户持仓报告</h1>
-        <div class="meta">客户：${c.name}（${c.id}）· ${c.age ? c.age + ' 岁' : '年龄未填'} · ${c.riskLevel} · 报告日期 ${dateStr}</div>
-        <div class="stats">
-            <div class="stat"><div class="v">${fmtMoney(s.totalAssets)}</div><div class="l">总资产</div></div>
-            <div class="stat"><div class="v" style="color:${pnlColor}">${s.totalPnl >= 0 ? '+' : ''}${fmtMoney(s.totalPnl)}</div><div class="l">持仓盈亏 (${s.totalPnlPct >= 0 ? '+' : ''}${s.totalPnlPct.toFixed(1)}%)</div></div>
-            <div class="stat"><div class="v">${fmtMoney(s.totalMarket)}</div><div class="l">持仓市值</div></div>
-            <div class="stat"><div class="v">${fmtMoney(c.availableCash)}</div><div class="l">可用资金</div></div>
-        </div>
-        <h2>持仓明细（${(c.positions || []).length} 只）</h2>
-        <table><thead><tr><th>股票名称</th><th>代码</th><th>板块</th><th>数量</th><th>成本价</th><th>现价</th><th>盈亏</th><th>盈亏%</th></tr></thead><tbody>${rows}</tbody></table>
-        <h2>风险预警</h2>
-        <div class="${alerts.length ? 'alert' : 'ok'}"><ul style="margin:0;padding-left:16px">${alertHtml}</ul></div>
-        <h2>客户备注</h2>
-        <div class="note">${c.note || '（无备注）'}</div>
-        <div class="footer">本报告由持仓复盘工作台自动生成，仅供内部参考 · 生成时间 ${new Date().toLocaleString('zh-CN')}</div>
-    </body></html>`;
-    const blob = new Blob([report], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = c.name + '_客户持仓报告_' + new Date().toISOString().slice(0, 10) + '.html';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('✅ 客户报告已生成，打开后 Ctrl+P 可另存为 PDF', 'success');
+    if (!c) {
+        showToast('请先选择要导出报告的客户', 'error');
+        return;
+    }
+    const token = getToken();
+    if (!token) {
+        showToast('登录状态已失效，请重新登录', 'error');
+        return;
+    }
+
+    showToast('正在生成持仓体检报告（实时分析客户持仓，请稍候）…', 'info');
+    try {
+        const resp = await fetch('/api/reports/portfolio-health/html', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+                client_id: c.id,          // 后端依此取真实持仓，绝不写死标的
+                adapter: 'public',        // 公开 API；离线/演示可改 'demo'
+                use_llm: false,
+                title: `${c.name} 持仓体检报告`,
+            }),
+        });
+
+        // 401/403：令牌失效，统一走过期登出流程
+        if (resp.status === 401 || resp.status === 403) {
+            try { localStorage.removeItem('stock_review_token'); } catch { /* ignore */ }
+            window.dispatchEvent(new CustomEvent('auth:expired', {
+                detail: { status: resp.status, message: '登录已失效' },
+            }));
+            showToast('登录已失效，请重新登录', 'error');
+            return;
+        }
+        if (!resp.ok) {
+            let msg = '报告生成失败';
+            try { const j = await resp.json(); msg = j.detail || msg; } catch { /* ignore */ }
+            showToast('❌ ' + msg, 'error');
+            return;
+        }
+
+        const html = await resp.text();
+        const win = window.open('', '_blank');
+        if (!win) {
+            showToast('⚠️ 浏览器拦截了弹出窗口，请允许本站弹出后重试', 'error');
+            return;
+        }
+        win.document.open();
+        win.document.write(html);
+        win.document.close();
+        win.focus();
+        // 等待 DOM 渲染后弹出打印对话框（可另存为 PDF）；延迟兜底避免部分浏览器 onload 不触发
+        const doPrint = () => { try { win.print(); } catch { /* ignore */ } };
+        if (win.document.readyState === 'complete') {
+            setTimeout(doPrint, 400);
+        } else {
+            win.onload = () => setTimeout(doPrint, 400);
+            // 双保险：即使 onload 未触发，500ms 后也尝试一次
+            setTimeout(doPrint, 1500);
+        }
+        showToast('✅ 报告已生成，使用打印对话框可另存为 PDF', 'success');
+    } catch (e) {
+        showToast('❌ 报告生成失败：' + (e && e.message ? e.message : '网络错误'), 'error');
+    }
 }

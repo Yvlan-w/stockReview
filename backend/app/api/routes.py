@@ -26,6 +26,7 @@ from ..schemas import (
     RelationImportRow, RelationExportRow, RelationImportResult,
     TransactionCreate, TransactionOut, PasswordChange, AdjustRequest,
     UserRenew, UserResetPassword, UserStatusPatch, AuditLogPage,
+    PortfolioHealthRequest, PortfolioHealthResponse,
 )
 from ..services import auth_service, client_service, risk_engine, notification_service
 from ..services import market_service
@@ -34,6 +35,10 @@ from ..services.adjust_service import execute_adjust, reverse_last_transaction, 
 from ..services import cost_basis_service
 from ..services.audit_service import log_user_activity
 from ..services import module_permission_service as mp_service
+from ..services.report_service import build_report, public_stocks
+from ..services.report_data_service import resolve_adapter
+from ..services.llm_narrative import generate_narrative, resolve_node
+from ..services.report_render import render_html_report
 
 router = APIRouter(prefix="/api")
 
@@ -1396,3 +1401,86 @@ def reset_module_visibility(
     """重置某角色 / 某账户的模块可见性覆盖（恢复默认或回退到更低优先级规则）。"""
     mp_service.reset_visibility(db, scope_type, scope_id, module_key)
     return {"status": "ok", "scope_type": scope_type, "scope_id": scope_id, "module_key": module_key}
+
+
+# ==================== 持仓体检报告（导出客户报告 / 持仓体检） ====================
+def _resolve_report_holdings(body: "PortfolioHealthRequest", db: Session, user: User):
+    """把请求解析为 holdings 列表（list[dict]）。
+
+    - 传了 ``client_id``：经权限校验后自动取该客户的真实持仓（不写死，绝不兜底示例股）；
+    - 否则用 ``body.holdings``。
+    返回空列表时由调用方返回 400。
+    """
+    if body.client_id:
+        client = client_service.get_visible_client(db, user, body.client_id)
+        return [
+            {
+                "code": p.code,
+                "name": p.name,
+                "sector": p.sector,
+                "quantity": float(p.quantity),
+                "cost_price": float(p.cost_price) if p.cost_price else None,
+            }
+            for p in client.positions
+        ]
+    return [h.model_dump() for h in body.holdings]
+
+
+@router.post("/reports/portfolio-health")
+def portfolio_health(
+    body: PortfolioHealthRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """生成持仓体检报告（结构化 JSON）。
+
+    用于前端展示与二次加工。支持：
+      - 直接传 ``holdings``（分析哪几只完全由调用方决定，不写死）；
+      - 或传 ``client_id`` 自动取客户真实持仓；
+      - ``adapter``：``demo``（离线确定性，默认）/ ``public``（公开 API，云端可用）；
+      - ``use_llm``：开启时尝试外部大模型叙事，未配置自动回落启发式兜底。
+
+    注：响应体为已清洗的 JSON dict（剔除内部字段），不使用严格 Pydantic
+    response_model，以避免高版本 Pydantic 对纯 ``Dict[str, Any]`` 响应模型的
+    "not fully defined" 校验缺陷，同时保持字段完全由后端契约控制。
+    """
+    holdings = _resolve_report_holdings(body, db, user)
+    if not holdings:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "持仓为空：请传入 holdings，或提供有效的 client_id")
+
+    adapter = resolve_adapter(body.adapter)
+    facts = build_report(holdings, adapter=adapter, title=body.title)
+    node = resolve_node(body.use_llm)
+    narrative = generate_narrative(facts, node=node)
+    return {
+        "meta": facts["meta"],
+        "stocks": public_stocks(facts["stocks"]),
+        "portfolio": facts["portfolio"],
+        "narrative": narrative,
+    }
+
+
+@router.post("/reports/portfolio-health/html")
+def portfolio_health_html(
+    body: PortfolioHealthRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """生成持仓体检报告（自包含 HTML，供前端新窗口打印 / 导出 PDF）。"""
+    holdings = _resolve_report_holdings(body, db, user)
+    if not holdings:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "持仓为空：请传入 holdings，或提供有效的 client_id")
+
+    adapter = resolve_adapter(body.adapter)
+    facts = build_report(holdings, adapter=adapter, title=body.title)
+    node = resolve_node(body.use_llm)
+    narrative = generate_narrative(facts, node=node)
+    html = render_html_report({
+        "meta": facts["meta"],
+        "stocks": facts["stocks"],
+        "portfolio": facts["portfolio"],
+        "narrative": narrative,
+    })
+    return Response(content=html, media_type="text/html; charset=utf-8")
