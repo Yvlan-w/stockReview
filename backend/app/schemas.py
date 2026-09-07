@@ -1,6 +1,6 @@
 """Pydantic 请求/响应模型（API 字段级契约）。"""
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
