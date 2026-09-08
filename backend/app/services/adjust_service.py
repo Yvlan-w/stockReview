@@ -14,6 +14,7 @@
     ⑦ 触发当日快照增量更新（非交易日自动跳过）
 """
 import datetime as dt
+import logging
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -310,6 +311,27 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
     # ------------------------------------------------------------------
     db.commit()
 
+    # 清仓（持仓行删除）后，主动清理该客户下失效的 client_news 关联（替代仅靠 TTL 自然清理）
+    if action == "sell" and position is None:
+        try:
+            from . import news_service
+            pruned = news_service.prune_stale_client_news(client.id, db)
+            if pruned:
+                logging.getLogger(__name__).info(
+                    "清仓后清理失效资讯关联(client=%s, code=%s): 删除 %d 条", client.id, code, pruned)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "清仓后资讯关联清理失败(client=%s, code=%s): %s", client.id, code, e)
+
+    # 方案二：买入（新建/加仓）后 best-effort 填充该股票板块映射，点亮 Tier2（失败不影响主流程）
+    if action == "buy":
+        try:
+            from . import news_service
+            news_service.refresh_boards_for_codes([code], db)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "调仓买入后板块映射刷新失败(client=%s, code=%s): %s", client.id, code, e)
+
     # ------------------------------------------------------------------
     # ⑦ 当日快照增量更新（非交易日自动跳过；失败不影响已提交的调仓）
     # ------------------------------------------------------------------
@@ -318,11 +340,27 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
         write_daily_snapshot(db, client, portfolio)
     except Exception as e:  # noqa: BLE001
         # 快照由后台循环每日重建兜底，此处失败仅记录
-        import logging
         logging.getLogger(__name__).warning(
             "调仓后快照更新失败（client=%s, %s %s）: %s",
             client.id, action, code, e,
         )
+
+    # ------------------------------------------------------------------
+    # ⑧ 买入新增/加仓后回扫存量新闻，补齐 client_news 关联（确保已入库新闻即时联动）。
+    #    卖出/复盘(adjust)不改变持仓，无需处理；匹配失败不影响已提交的调仓。
+    # ------------------------------------------------------------------
+    if action == "buy":
+        try:
+            from . import news_service
+            added = news_service.match_news_for_client(client.id, db)
+            if added:
+                logging.getLogger(__name__).info(
+                    "调仓买入后联动资讯(client=%s, code=%s): 新增 %d 条关联",
+                    client.id, code, added)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "调仓买入后资讯关联匹配失败(client=%s, code=%s): %s",
+                client.id, code, e)
 
     # 提交后重新读取最新状态返回（清仓时 position 已删除）
     db.refresh(client)
@@ -434,6 +472,13 @@ def reverse_last_transaction(db: Session, client: Client, code: str) -> dict:
 
         db.delete(tx)
         db.commit()
+        # 方案二：撤销卖出会重建/恢复持仓，best-effort 填充该股票板块映射，点亮 Tier2
+        try:
+            from . import news_service
+            news_service.refresh_boards_for_codes([code], db)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "撤销卖出后板块映射刷新失败(client=%s, code=%s): %s", client.id, code, e)
         return {"action": "sell", "transaction_id": tx.id, "restored_quantity": tx.quantity}
 
     if tx.action == "buy":
@@ -449,13 +494,36 @@ def reverse_last_transaction(db: Session, client: Client, code: str) -> dict:
         position = db.query(Position).filter(
             Position.client_id == client.id, Position.code == code,
         ).first()
+        position_removed = False
         if position is not None:
             if position.quantity <= (tx.quantity or 0):
+                position_removed = True
                 db.delete(position)
             else:
                 position.quantity -= tx.quantity
         db.delete(tx)
         db.commit()
+        # 撤销买入导致持仓清零（持仓行删除）时，主动清理失效的 client_news 关联
+        if position_removed:
+            try:
+                from . import news_service
+                pruned = news_service.prune_stale_client_news(client.id, db)
+                if pruned:
+                    logging.getLogger(__name__).info(
+                        "撤销买入清仓后清理失效资讯关联(client=%s, code=%s): 删除 %d 条",
+                        client.id, code, pruned)
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "撤销买入清仓后资讯关联清理失败(client=%s, code=%s): %s",
+                    client.id, code, e)
+        # 方案二：撤销买入后持仓若仍在（未清仓）best-effort 刷新板块映射；已清仓则不补（避免无用映射对）
+        if not position_removed:
+            try:
+                from . import news_service
+                news_service.refresh_boards_for_codes([code], db)
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "撤销买入后板块映射刷新失败(client=%s, code=%s): %s", client.id, code, e)
         return {"action": "buy", "transaction_id": tx.id, "restored_quantity": tx.quantity}
 
     raise RevokeError(f"未知操作类型：{tx.action}", status_code=400)

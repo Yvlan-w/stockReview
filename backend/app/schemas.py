@@ -435,3 +435,53 @@ class PortfolioHealthResponse(BaseModel):
     stocks: List[Dict[str, Any]]
     portfolio: Dict[str, Any]
     narrative: Dict[str, Any]
+
+
+# ---- 持仓相关资讯（两表联动：news_item + client_news）----
+class NewsItemOut(BaseModel):
+    """资讯主表响应（注意：均按 UTC 存储，展示层 +8h）。"""
+    model_config = ConfigDict(from_attributes=True)
+    news_id: str
+    source: str
+    title: str
+    summary: Optional[str] = None
+    url: Optional[str] = None
+    content: Optional[str] = None
+    published_at: Optional[datetime] = None
+    first_seen: Optional[datetime] = None
+    stock_codes: List[str] = []
+
+
+class RelatedNewsOut(BaseModel):
+    """客户持仓相关快讯：资讯正文 + 匹配上下文（tier / matched_codes / is_read）。"""
+    news_id: str
+    source: str
+    title: str
+    summary: Optional[str] = None
+    url: Optional[str] = None
+    published_at: Optional[datetime] = None
+    stock_codes: List[str] = []
+    tier: int                                    # 1=个股相关 / 2=板块相关
+    matched_codes: List[str] = []                # 实际命中的客户持仓代码（UI 高亮用）
+    is_read: bool = False
+    first_seen: Optional[datetime] = None         # 该关联首次创建时间（TTL 基准）
+
+
+class NewsIngestResultOut(BaseModel):
+    """手动触发采集（POST /api/news/ingest）的返回。"""
+    status: str = "ok"
+    stats: Dict[str, Any] = {}
+
+
+class NewsAffectedClientOut(BaseModel):
+    """反向端点：受某条资讯影响的客户（脱敏，仅基础标识 + 持仓占比）。"""
+    client_id: str
+    client_name: str
+    matched_codes: List[str] = []
+    holding_pct: Optional[float] = None           # 命中标的占该客户总持仓成本的比例（%）
+
+
+class NewsAffectedClientsOut(BaseModel):
+    news_id: str
+    title: str
+    clients: List[NewsAffectedClientOut] = []

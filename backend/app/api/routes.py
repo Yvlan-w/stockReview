@@ -14,6 +14,7 @@ from ..core.security import create_access_token
 from ..database import get_db
 from ..models import (
     User, Client, Position, RiskAlert, Notification, Transaction, AuditLog,
+    NewsItem, ClientNews,
     ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR, ROLE_USER,
     ALERT_OPEN, ALERT_ACK, ALERT_RESOLVED,
     USER_STATUS_DELETED, USER_STATUS_ACTIVE, USER_STATUS_EXPIRED,
@@ -27,6 +28,7 @@ from ..schemas import (
     TransactionCreate, TransactionOut, PasswordChange, AdjustRequest,
     UserRenew, UserResetPassword, UserStatusPatch, AuditLogPage,
     PortfolioHealthRequest, PortfolioHealthResponse,
+    RelatedNewsOut, NewsIngestResultOut, NewsAffectedClientsOut, NewsItemOut,
 )
 from ..services import auth_service, client_service, risk_engine, notification_service
 from ..services import market_service
@@ -1484,3 +1486,158 @@ def portfolio_health_html(
         "narrative": narrative,
     })
     return Response(content=html, media_type="text/html; charset=utf-8")
+
+
+# ==================== 持仓相关资讯（两表联动：news_item + client_news） ====================
+def _holding_pct(db: Session, client_id: str, matched_codes: list) -> Optional[float]:
+    """命中标的占该客户总持仓成本的比例（%），用于反向端点脱敏展示。
+
+    以成本市值（cost_price × quantity）估算，不依赖实时行情，开销低。
+    """
+    if not matched_codes:
+        return None
+    positions = db.query(Position).filter(Position.client_id == client_id).all()
+    if not positions:
+        return None
+    matched_set = set(matched_codes)
+    from ..services.news_service import normalize_code
+    total = sum((p.cost_price or 0) * p.quantity for p in positions)
+    matched = sum((p.cost_price or 0) * p.quantity
+                  for p in positions if normalize_code(p.code) in matched_set)
+    if total <= 0:
+        return None
+    return round(matched / total * 100, 2)
+
+
+@router.get("/clients/{client_id}/related-news", response_model=List[RelatedNewsOut])
+def get_related_news(
+    client_id: str,
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """返回某客户的持仓相关快讯（client_news JOIN news_item），按关联创建时间倒序。
+
+    权限：经 get_visible_client 校验——本人（owner_user_id）或 advisor/service 可见。
+    每条含 tier（1=个股相关 / 2=板块相关）、matched_codes、is_read。
+    """
+    client_service.get_visible_client(db, user, client_id)  # 校验可见性（不可见 -> 404）
+    rows = (
+        db.query(ClientNews, NewsItem)
+        .join(NewsItem, ClientNews.news_id == NewsItem.news_id)
+        .filter(ClientNews.client_id == client_id)
+        .order_by(ClientNews.first_seen.desc())
+        .limit(limit)
+        .all()
+    )
+    from ..services.news_service import is_news_displayable
+    return [{
+        "news_id": ni.news_id,
+        "source": ni.source,
+        "title": ni.title,
+        "summary": ni.summary,
+        "url": ni.url,
+        "published_at": ni.published_at.isoformat() if ni.published_at else None,
+        "stock_codes": ni.stock_codes or [],
+        "tier": cn.tier,
+        "matched_codes": cn.matched_codes or [],
+        "is_read": cn.is_read,
+        "first_seen": cn.first_seen.isoformat() if cn.first_seen else None,
+    } for cn, ni in rows if is_news_displayable(ni)]
+
+
+@router.post("/news/ingest", response_model=NewsIngestResultOut)
+async def ingest_news(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """手动触发一次资讯采集周期（便于测试/回填）。权限：admin/service。
+
+    执行 fetch -> upsert -> 匹配 -> 清理，返回各阶段统计。
+    """
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN, ROLE_SERVICE)(user)
+    from ..services.news_service import run_once
+    stats = await run_once()
+    return {"status": "ok", "stats": stats}
+
+
+@router.get("/news", response_model=List[NewsItemOut])
+def list_news(
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """最近 news_item 原始流（全局资讯库视角）。权限：admin/service/advisor。"""
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR)(user)
+    from ..services.news_service import is_news_displayable
+    rows = (
+        db.query(NewsItem)
+        .order_by(NewsItem.first_seen.desc())
+        .limit(limit)
+        .all()
+    )
+    # 序列化兜底：过滤存量脏数据（如测试占位、无链接无正文的空壳资讯）。
+    return [ni for ni in rows if is_news_displayable(ni)]
+
+
+@router.get("/news/{news_id}/clients", response_model=NewsAffectedClientsOut)
+def news_affected_clients(
+    news_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """反向端点（方案 E）：给定一条资讯，返回受影响的客户列表（脱敏）。
+
+    复用同一匹配内核，零额外数据源。权限：admin/service/advisor。
+    仅返回 client_id / name / matched_codes / 持仓占比，不含敏感财务明细。
+    """
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR)(user)
+    ni = db.get(NewsItem, news_id)
+    if ni is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "资讯不存在")
+    rows = db.query(ClientNews).filter(ClientNews.news_id == news_id).all()
+    clients = []
+    for cn in rows:
+        client = db.get(Client, cn.client_id)
+        name = client.name if client else cn.client_id
+        clients.append({
+            "client_id": cn.client_id,
+            "client_name": name,
+            "matched_codes": cn.matched_codes or [],
+            "holding_pct": _holding_pct(db, cn.client_id, cn.matched_codes or []),
+        })
+    return {"news_id": news_id, "title": ni.title, "clients": clients}
+
+
+@router.post("/news/refresh-boards", response_model=dict)
+async def refresh_boards(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """手动触发 code→BK 映射补全（启用 Tier2 板块相关）。权限：admin/service。
+
+    拉取新闻流中出现过的板块(BK)成分股，写入 stock_boards；force=True 忽略节流。
+    返回刷新的板块数与当前 stock_boards 总行数。沙箱若屏蔽 push2 则返回 0（由离线共现推导兜底）。
+    """
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN, ROLE_SERVICE)(user)
+    from ..services.news_service import refresh_stock_boards
+    refreshed = refresh_stock_boards(db, force=True)
+    total = db.query(StockBoards).count()
+    return {"status": "ok", "boards_refreshed": refreshed, "stock_boards_total": total}
+
+
+@router.get("/news/boards", response_model=list)
+def list_boards(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """查看当前 code→BK 映射（stock_boards）。权限：admin/service/advisor。"""
+    from ..core.deps import require_roles
+    require_roles(ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR)(user)
+    rows = db.query(StockBoards).order_by(StockBoards.code).all()
+    return [{"code": r.code, "board_codes": r.board_codes or [], "updated_at":
+             r.updated_at.isoformat() if r.updated_at else None} for r in rows]

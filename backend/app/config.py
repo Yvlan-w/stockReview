@@ -78,3 +78,21 @@ TRADING_FEE_COMMISSION = float(os.getenv("TRADING_FEE_COMMISSION", "0.00025"))  
 TRADING_FEE_MIN_COMMISSION = float(os.getenv("TRADING_FEE_MIN_COMMISSION", "5.0"))  # 最低佣金（元）
 TRADING_FEE_STAMP_TAX = float(os.getenv("TRADING_FEE_STAMP_TAX", "0.0005"))        # 印花税（千0.5，仅卖出）
 TRADING_FEE_TRANSFER_FEE = float(os.getenv("TRADING_FEE_TRANSFER_FEE", "0.00001")) # 过户费（万0.1，沪深两市）
+
+# ---------------------------------------------------------------------------
+# 持仓相关资讯采集（后端常驻 7×24 联动层；两表：news_item + client_news）
+# 采集频率：事件流刷新快，upsert 天然去重（重复轮询只产生请求成本，不会重复入库），
+# 故采用 30~60s 级别轮询；交易期更密、非交易期放宽，并加 ±jitter 避免多实例共振。
+# ---------------------------------------------------------------------------
+NEWS_SOURCES = [s.strip() for s in os.getenv("NEWS_SOURCES", "eastmoney,sina").split(",") if s.strip()]
+NEWS_INGEST_INTERVAL_SEC = int(os.getenv("NEWS_INGEST_INTERVAL_SEC", "60"))    # 交易期采集间隔
+NEWS_INGEST_INTERVAL_OFF = int(os.getenv("NEWS_INGEST_INTERVAL_OFF", "300"))   # 非交易期采集间隔
+NEWS_INGEST_JITTER = int(os.getenv("NEWS_INGEST_JITTER", "10"))               # 间隔随机抖动上限（秒）
+NEWS_TTL_HOURS = int(os.getenv("NEWS_TTL_HOURS", "24"))                       # 关联/孤儿资讯 TTL
+NEWS_PAGE_SIZE = int(os.getenv("NEWS_PAGE_SIZE", "50"))                        # 单次抓取条数
+NEWS_HTTP_TIMEOUT = int(os.getenv("NEWS_HTTP_TIMEOUT", "15"))                  # 抓取超时（秒）
+NEWS_USER_AGENT = os.getenv(
+    "NEWS_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+)

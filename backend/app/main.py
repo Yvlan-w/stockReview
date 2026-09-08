@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import random
 
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,7 @@ from .config import (
     MARKET_REFRESH_INTERVAL_KLINE, MARKET_REFRESH_INTERVAL_SECTOR,
     MARKET_REFRESH_INTERVAL_SECTOR_OFF,
     STOCK_REFRESH_INTERVAL, STOCK_REFRESH_INTERVAL_OFF,
+    NEWS_INGEST_INTERVAL_SEC, NEWS_INGEST_INTERVAL_OFF, NEWS_INGEST_JITTER,
 )
 from .database import Base, SessionLocal, engine
 from .services import market_service
@@ -175,6 +177,35 @@ def _local_date_str() -> str:
     return dt.date.today().isoformat()
 
 
+async def _news_ingest_loop():
+    """持仓相关资讯常驻采集层：交易期每 60s、非交易期每 300s 抓取一次 7×24 快讯，
+    解析结构化个股/板块代码 → 匹配客户持仓 → 写入 client_news 关联表。
+
+    单实例假设（当前单容器）直接循环；多 worker 需加 advisory lock（见计划 R3）。
+    任一周期异常被捕获后继续，避免任务退出。
+    """
+    await asyncio.sleep(10)  # 启动稍后，等建表/种子完成
+    while True:
+        try:
+            base = (NEWS_INGEST_INTERVAL_SEC
+                    if market_service.is_trading_hours()
+                    else NEWS_INGEST_INTERVAL_OFF)
+            from .services.news_service import run_once
+            stats = await run_once()
+            logger.info(
+                "[资讯采集] fetched=%d inserted=%d matched_rows=%d matched_clients=%d pruned=%d/%d",
+                stats["fetched"], stats["inserted"], stats["matched_rows"],
+                stats["matched_clients"], stats["pruned_cn"], stats["pruned_ni"],
+            )
+            jitter = random.uniform(0, NEWS_INGEST_JITTER)
+            await asyncio.sleep(base + jitter)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning("资讯采集循环异常（继续）: %s", e)
+            await asyncio.sleep(NEWS_INGEST_INTERVAL_SEC)
+
+
 def _migrate_sqlite_columns():
     """SQLite 轻量迁移：为已有表补充新增列（create_all 不会改已存在的表）。
     SQLite 不支持 DROP COLUMN / ALTER COLUMN，仅支持 ADD COLUMN。
@@ -323,6 +354,8 @@ async def lifespan(app: FastAPI):
     _bg_tasks.append(asyncio.create_task(_kline_refresh_loop(), name="market-kline"))
     _bg_tasks.append(asyncio.create_task(_sector_refresh_loop(), name="market-sector"))
     _bg_tasks.append(asyncio.create_task(_stock_price_refresh_loop(), name="stock-price"))
+    # 持仓相关资讯常驻采集（两表联动扇出）
+    _bg_tasks.append(asyncio.create_task(_news_ingest_loop(), name="news-ingest"))
 
     yield
 

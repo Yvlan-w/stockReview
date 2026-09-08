@@ -13,6 +13,7 @@ import { RISK_BADGE, ALL_MANAGED_TAGS } from '../core/config.js';
 import { showToast } from '../core/ui.js';
 import { marketDataState } from '../services/marketService.js';
 import { updatePriceCache, getPrice } from '../services/priceService.js';
+import { loadRelatedNews } from '../services/newsService.js';
 
 
 function escapeHtml(s) {
@@ -173,6 +174,14 @@ export async function refreshClientDetail() {
     if (cnt) {
         const positions = portfolioData?.positions || getUserPositions();
         cnt.textContent = positions.length;
+    }
+
+    // 持仓相关快讯（后端两表联动）：随客户切换刷新，置顶展示与持仓相关的市场动态
+    const relClient = getCurrentClient();
+    if (relClient) {
+        loadRelatedNews(relClient.id).catch(() => {});
+    } else {
+        loadRelatedNews(null).catch(() => {});
     }
 }
 

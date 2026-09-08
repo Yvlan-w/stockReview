@@ -1,4 +1,5 @@
 """客户管理服务：CRUD、关系映射校验、角色数据范围。"""
+import logging
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -264,7 +265,11 @@ def export_relations(db: Session) -> list[dict]:
 
 
 def update_client_positions(db: Session, client: Client, positions) -> Client:
-    """整体替换客户持仓（前端按可见范围编辑后回写）。"""
+    """整体替换客户持仓（前端按可见范围编辑后回写）。
+
+    持仓变更后回扫 TTL 内存量新闻，补齐 client_news 关联——确保已入库新闻也能即时联动到
+    该客户资讯栏（而非只能等下一条新闻入库）。匹配失败不影响持仓写入结果。
+    """
     client.positions.clear()
     for p in positions:
         client.positions.append(Position(
@@ -273,6 +278,31 @@ def update_client_positions(db: Session, client: Client, positions) -> Client:
         ))
     db.commit()
     db.refresh(client)
+    # 方案二：先 best-effort 填充持仓股票的板块映射（独立 try，绝不被下游异常吞掉），
+    # 使下方 Tier2 匹配立即可用（失败不影响主流程）。
+    try:
+        from . import news_service
+        held = {news_service.normalize_code(p.code) for p in positions if p.code}
+        if held:
+            news_service.refresh_boards_for_codes(held, db)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "持仓更新后板块映射刷新失败(client=%s): %s", client.id, e)
+    # 持仓变更后回扫 TTL 内存量新闻，补齐 client_news 关联 + 清理失效关联（独立 try）
+    try:
+        from . import news_service
+        added = news_service.match_news_for_client(client.id, db)
+        if added:
+            logging.getLogger(__name__).info(
+                "持仓更新后联动资讯(client=%s): 新增 %d 条关联", client.id, added)
+        # 持仓整体替换后，清理因移除持仓而失效的 client_news 行（替代仅靠 TTL 自然清理）
+        pruned = news_service.prune_stale_client_news(client.id, db)
+        if pruned:
+            logging.getLogger(__name__).info(
+                "持仓更新后清理失效资讯关联(client=%s): 删除 %d 条", client.id, pruned)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "持仓更新后资讯关联失败(client=%s): %s", client.id, e)
     return client
 
 

@@ -16,7 +16,7 @@ import datetime as _dt
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text,
-    UniqueConstraint, PrimaryKeyConstraint,
+    UniqueConstraint, PrimaryKeyConstraint, SmallInteger,
 )
 from sqlalchemy.orm import relationship
 
@@ -440,3 +440,70 @@ class ModuleVisibility(Base):
             name="uq_module_visibility_scope",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 持仓相关资讯（后端常驻采集层 + 两表关联扇出）
+#   news_item   全局资讯主表（去重，一份正文）
+#   client_news 客户-资讯关联表（扇出，每客户一份匹配上下文）
+#   stock_boards 板块/概念缓存表（支撑 Tier2 板块相关；空时自动跳过 Tier2）
+# 建表依赖现有 Base.metadata.create_all（lifespan 启动时），无需手写迁移。
+# ---------------------------------------------------------------------------
+
+class NewsItem(Base):
+    """资讯主表：全局去重，一份正文。
+
+    news_id 用源原生 id（东财 em_<id> / 新浪 sina_<id>）天然去重；
+    stock_codes 为归一化后的代码数组，如 ["600519","BK0815"]。
+    first_seen 为后端首次入库时间（TTL 基准），全局只写一次。
+    """
+
+    __tablename__ = "news_item"
+
+    news_id = Column(String(64), primary_key=True)
+    source = Column(String(16), nullable=False, index=True)  # eastmoney_7x24 / sina_7x24
+    title = Column(Text, nullable=False)
+    summary = Column(Text, default="")
+    url = Column(Text, default="")
+    content = Column(Text, default="")
+    published_at = Column(DateTime, nullable=True, index=True)
+    first_seen = Column(DateTime, default=utcnow, nullable=False, index=True)
+    stock_codes = Column(JSON, default=list)  # 归一化代码数组
+    raw = Column(JSON, nullable=True)         # 原始 payload（便于排查）
+
+
+class ClientNews(Base):
+    """客户-资讯关联表：扇出，每客户一份匹配上下文。
+
+    UNIQUE(client_id, news_id) 防止重复行；tier 区分个股相关/板块相关；
+    matched_codes 为实际命中的客户持仓代码（用于 UI 高亮）。
+    """
+
+    __tablename__ = "client_news"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    client_id = Column(String(64), ForeignKey("clients.id"), nullable=False, index=True)
+    news_id = Column(String(64), ForeignKey("news_item.news_id"), nullable=False, index=True)
+    tier = Column(SmallInteger, nullable=False, default=1)  # 1=个股相关 / 2=板块相关
+    matched_codes = Column(JSON, default=list)  # 实际命中的客户持仓代码
+    first_seen = Column(DateTime, default=utcnow, nullable=False)  # 该关联首次创建时间（TTL 基准）
+    is_read = Column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "news_id", name="uq_client_news"),
+        Index("ix_client_news_client_first_seen", "client_id", "first_seen"),
+    )
+
+
+class StockBoards(Base):
+    """个股→板块/概念缓存表（支撑 Tier2 板块相关）。
+
+    当前无内置 BK 映射数据源（见实施计划 R2），MVP 阶段表为空、Tier2 自动跳过；
+    待补齐 code→BK 映射接口后写入此处即可开启 Tier2。
+    """
+
+    __tablename__ = "stock_boards"
+
+    code = Column(String(16), primary_key=True)  # 个股代码（已归一化，对齐 positions.code）
+    board_codes = Column(JSON, default=list)      # 该股票所属板块/概念 BK 码数组
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
