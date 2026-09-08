@@ -19,7 +19,7 @@ import {
     renderMarketOverview, refreshMarket, renderSectorHeatmap,
     initVolumeChartTabs,
 } from './components/market.js';
-import { fetchLiveNews, showMoreNews } from './services/newsService.js';
+import { fetchLiveNews, showMoreNews, showMoreRelatedNews } from './services/newsService.js';
 import {
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, revokePosition,
@@ -56,7 +56,7 @@ Object.assign(window, {
     openClientEditModal, closeClientEditModal, submitClientEdit,
     filterPositions, sortTable,
     refreshMarket,
-    fetchLiveNews, showMoreNews,
+    fetchLiveNews, showMoreNews, showMoreRelatedNews,
     openIdentityModal, closeIdentityModal,
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, revokePosition,

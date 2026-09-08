@@ -27,10 +27,16 @@ export let liveNewsLoaded = false;
 // 最近一次成功加载的资讯，用于刷新失败时保留上次结果
 let lastNewsItems = [];
 
-// 当前可见条数（默认仅展示前 3 条，"显示更多"每次追加）
-let newsVisibleCount = 3;
-const NEWS_INITIAL_COUNT = 3;
+// 当前可见条数（默认仅展示前 4 条，"显示更多"每次追加）
+let newsVisibleCount = 4;
+const NEWS_INITIAL_COUNT = 4;
 const NEWS_PAGE_SIZE = 5;
+
+// 持仓相关快讯：默认仅展示前 4 条，其余通过"显示更多"按钮展开（与实时资讯一致）
+const RELATED_INITIAL_COUNT = 4;
+const RELATED_PAGE_SIZE = 5;
+let relatedNewsItems = [];
+let relatedVisibleCount = RELATED_INITIAL_COUNT;
 
 // 各数据源当前可用状态（供界面展示）
 export let newsSourceStatus = { ok: [], fail: [] };
@@ -297,16 +303,32 @@ export async function fetchClientRelatedNews(clientId, limit = 50) {
 }
 
 export function renderRelatedNews(items) {
+    // 拉取结果存入模块状态，重置可见条数为默认 4；实际渲染交由 _paintRelatedNews
+    relatedNewsItems = Array.isArray(items) ? items : [];
+    relatedVisibleCount = RELATED_INITIAL_COUNT;
+    _paintRelatedNews();
+}
+
+// "显示更多"：每次追加 5 条（全部展示后按钮自动隐藏）
+export function showMoreRelatedNews() {
+    relatedVisibleCount = Math.min(relatedVisibleCount + RELATED_PAGE_SIZE, relatedNewsItems.length);
+    _paintRelatedNews();
+}
+
+function _paintRelatedNews() {
     const el = document.getElementById('relatedNewsPanel');
     if (!el) return;
-    if (!items || !items.length) {
+    if (!relatedNewsItems.length) {
         el.innerHTML = '';
         el.classList.add('hidden');
         return;
     }
     el.classList.remove('hidden');
 
-    const cards = items.map(it => {
+    const visibleItems = relatedNewsItems.slice(0, relatedVisibleCount);
+    const remaining = relatedNewsItems.length - visibleItems.length;
+
+    const cards = visibleItems.map(it => {
         const isBoard = it.tier === 2;
         const tierLabel = isBoard ? '板块相关' : '个股相关';
         const tierCls = isBoard
@@ -337,6 +359,16 @@ export function renderRelatedNews(items) {
             : `<div class="${baseCls} opacity-90">${inner}</div>`;
     }).join('');
 
+    // 显示更多按钮：全部展示后不再渲染
+    const moreBtnHtml = remaining > 0
+        ? `<div class="flex justify-center pt-1">
+               <button onclick="showMoreRelatedNews()" class="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl border border-hairline bg-white text-sm font-medium text-body hover:text-primary hover:border-primary/40 transition-colors">
+                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                   显示更多（还有 ${remaining} 条）
+               </button>
+           </div>`
+        : '';
+
     el.innerHTML = `
         <div class="mb-3 flex items-center gap-2 flex-wrap">
             <svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -348,6 +380,7 @@ export function renderRelatedNews(items) {
             </button>
         </div>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${cards}</div>
+        ${moreBtnHtml}
     `;
 }
 

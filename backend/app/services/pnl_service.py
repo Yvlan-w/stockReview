@@ -342,6 +342,7 @@ def compute_portfolio(db: Session, client: Client) -> dict:
         position_details.append({
             "code": pos.code,
             "name": pos.name,
+            "sector": pos.sector,
             "quantity": pos.quantity,
             "costPrice": pos.cost_price,
             "currentPrice": current_price,

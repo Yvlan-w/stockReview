@@ -262,6 +262,7 @@ class StockPriceBatchOut(BaseModel):
 class PositionDetail(BaseModel):
     code: str
     name: str
+    sector: str = ""   # 板块分类（与 Position 一致）；组合接口此前漏传，导致前端新建持仓后板块列为空
     quantity: int
     costPrice: float
     currentPrice: float
