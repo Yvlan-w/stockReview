@@ -13,6 +13,7 @@ from starlette.responses import FileResponse
 
 from .api.routes import router
 from .api.ws import ws_router
+from .api.ocr import ocr_router
 from .config import (
     FRONTEND_DIR, MARKET_REFRESH_INTERVAL_REALTIME, MARKET_REFRESH_INTERVAL_REALTIME_OFF,
     MARKET_REFRESH_INTERVAL_KLINE, MARKET_REFRESH_INTERVAL_SECTOR,
@@ -378,6 +379,7 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(ws_router)
+app.include_router(ocr_router)
 
 
 @app.get("/api/health")

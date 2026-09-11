@@ -319,6 +319,14 @@
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                                             添加持仓
                                         </button>
+                                        <button onclick="startOcrImport('trade')" data-require-edit class="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-pill border border-hairline text-ink hover:bg-surface-strong transition-colors">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4-4 4 4 4-6 4 4"></path></svg>
+                                            导入交易
+                                        </button>
+                                        <button onclick="startOcrImport('holding')" data-require-edit class="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-pill border border-hairline text-ink hover:bg-surface-strong transition-colors">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4-4 4 4 4-6 4 4"></path></svg>
+                                            导入持仓
+                                        </button>
                                         <div class="flex items-center gap-2 bg-surface-strong rounded-pill p-1">
                                             <button onclick="filterPositions('all')" data-filter="all" class="filter-btn active px-4 py-1.5 text-sm font-medium rounded-pill transition-all bg-canvas text-ink shadow-sm">全部</button>
                                             <button onclick="filterPositions('profit')" data-filter="profit" class="filter-btn px-4 py-1.5 text-sm font-medium text-muted rounded-pill transition-all">盈利</button>

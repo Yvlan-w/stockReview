@@ -14,7 +14,7 @@ from ..core.security import create_access_token
 from ..database import get_db
 from ..models import (
     User, Client, Position, RiskAlert, Notification, Transaction, AuditLog,
-    NewsItem, ClientNews,
+    NewsItem, ClientNews, StockBoards,
     ROLE_ADMIN, ROLE_SERVICE, ROLE_ADVISOR, ROLE_USER,
     ALERT_OPEN, ALERT_ACK, ALERT_RESOLVED,
     USER_STATUS_DELETED, USER_STATUS_ACTIVE, USER_STATUS_EXPIRED,

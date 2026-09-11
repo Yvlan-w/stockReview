@@ -23,6 +23,8 @@ import { fetchLiveNews, showMoreNews, showMoreRelatedNews } from './services/new
 import {
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, revokePosition,
+    startOcrImport, openOcrImportModal, closeOcrImportModal, importOcrRows, ocrDeleteRow, ocrRetryRow,
+    openOcrHoldingModal, closeOcrHoldingModal, importOcrHoldings, ocrHoldingDeleteRow, recomputeHoldingPnl,
 } from './components/modals.js';
 import {
     openIdentityModal, closeIdentityModal,
@@ -60,6 +62,8 @@ Object.assign(window, {
     openIdentityModal, closeIdentityModal,
     openPositionModal, closePositionModal, openAdjustModal, closeAdjustModal,
     executeAdjust, savePosition, revokePosition,
+    startOcrImport, openOcrImportModal, closeOcrImportModal, importOcrRows, ocrDeleteRow, ocrRetryRow,
+    openOcrHoldingModal, closeOcrHoldingModal, importOcrHoldings, ocrHoldingDeleteRow, recomputeHoldingPnl,
     handleLogin, handleLogout, toggleNotificationPanel, openNotification, markAllRead,
     handleDeleteSelfAccount,
     openAdminPanel, closeAdminPanel, switchAdminTab, refreshAdminPanel,

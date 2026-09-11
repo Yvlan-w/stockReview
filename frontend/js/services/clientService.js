@@ -408,6 +408,28 @@ export async function executeAdjustApi(clientId, adjustData) {
     throw new Error(message);
 }
 
+// 上传交易截图做 OCR 识别：POST /api/ocr/recognize（multipart）。不手动设 Content-Type，
+// 由浏览器自动带 boundary。识别出的交易行返回给前端预览编辑，落库由前端逐笔调 executeAdjustApi。
+export async function recognizeOcrImage(file, kind = 'trade') {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (kind === 'holding' || kind === 'trade') fd.append('kind', kind);
+    const resp = await fetch('/api/ocr/recognize', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}` },
+        body: fd,
+    });
+    if (resp.ok) return await resp.json();
+    let message = '截图识别失败';
+    try {
+        const body = JSON.parse(await resp.text());
+        if (body?.detail) message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+    } catch { /* 忽略解析失败 */ }
+    const err = new Error(message);
+    err.status = resp.status;
+    throw err;
+}
+
 // 兼容别名：旧代码调用 adjustClient 时转发到 executeAdjustApi
 export async function adjustClient(clientId, payload) {
     return await executeAdjustApi(clientId, payload);
@@ -434,9 +456,10 @@ export async function revokePositionApi(clientId, code) {
     throw err;
 }
 
-// 创建一条"调整"复盘记录（编辑持仓时调用）：POST /api/clients/{id}/transactions，action='adjust'
-// 字段与"买入"记录保持一致（code/name/quantity/price/cost_price），仅前置标签为黄色"调整"。
-export async function createAdjustRecord(clientId, data) {
+// 创建一条复盘记录（编辑持仓/持仓截图导入时调用）：POST /api/clients/{id}/transactions
+// action 默认 'adjust'（黄色"调整"标签）；持仓截图合并导入时可传 'buy'/'sell' 按分类打标。
+// 字段与"买入"记录保持一致（code/name/quantity/price/cost_price）。
+export async function createAdjustRecord(clientId, data, action = 'adjust') {
     if (!clientId) return null;
     try {
         const resp = await fetch(`/api/clients/${encodeURIComponent(clientId)}/transactions`, {
@@ -445,12 +468,12 @@ export async function createAdjustRecord(clientId, data) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${localStorage.getItem('stock_review_token')}`
             },
-            body: JSON.stringify({ action: 'adjust', ...data })
+            body: JSON.stringify({ action, ...data })
         });
         if (resp.ok) return await resp.json();
-        console.warn('创建调整复盘记录失败:', resp.status, await resp.text().catch(() => ''));
+        console.warn('创建复盘记录失败:', resp.status, await resp.text().catch(() => ''));
     } catch (e) {
-        console.warn('创建调整复盘记录异常:', e);
+        console.warn('创建复盘记录异常:', e);
     }
     return null;
 }

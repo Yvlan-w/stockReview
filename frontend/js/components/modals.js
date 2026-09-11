@@ -1,7 +1,9 @@
 // ============================================================
 // 持仓弹窗组件：新增/编辑/加仓/减仓/删除
 // ============================================================
-import { getUserPositions, saveUserPositions, getCurrentClient, loadClients, executeAdjustApi, fetchClientPortfolio, fetchClientPnlHistory, searchStocksApi, syncClientState, revokePositionApi, createAdjustRecord } from '../services/clientService.js';
+import { getUserPositions, saveUserPositions, getCurrentClient, loadClients, executeAdjustApi, recognizeOcrImage, fetchClientPortfolio, fetchClientPnlHistory, searchStocksApi, syncClientState, revokePositionApi, createAdjustRecord, updateClientRemote } from '../services/clientService.js';
+// updateClientPositions 定义在 authService.js（clientService 仅内部 import，未 re-export）
+import { updateClientPositions } from '../services/authService.js';
 import { formatCurrency, formatNumber, getPnLColor } from '../core/formatters.js';
 import { SECTORS } from '../core/config.js';
 import { showToast, hideToast } from '../core/ui.js';
@@ -1184,4 +1186,988 @@ export async function revokePosition(code) {
             showToast('❌ 撤销失败：' + (e?.message || '未知错误'), 'error');
         }
     }
+}
+
+// ============================================================
+// OCR 截图识别导入：上传截图 → 预览编辑 → 按序导入（逐条淡出）
+// 落库复用既有 executeAdjustApi（POST /api/clients/{id}/adjust），逐笔原子事务，
+// 因此无需在此重复实现持仓/现金/成本批次/Tier2 更新逻辑。
+// ============================================================
+let ocrRows = [];          // 当前预览的可编辑行：{uid,name,code,action,quantity,price,fee,sector,trade_date,trade_time,conf}
+let ocrImporting = false;
+let ocrSeq = 0;
+let ocrPendingKind = 'trade';   // 待识别截图类型：trade=交易，holding=持仓
+
+// 持仓截图预览状态（与交易截图流程相互独立，避免相互污染）
+let ocrHoldingRows = [];          // [{uid,name,code,quantity,cost_price,current_price,market_value,float_pnl,pnl_pct,sector,conf}]
+let ocrHoldingImporting = false;
+let ocrHoldingSeq = 0;
+let ocrHoldingScreenshot = { available_cash: null, total_assets: null };
+let ocrHoldingMergeMode = 'merge'; // 持仓导入方式：merge=合并（默认），overwrite=覆盖（整体替换）
+
+const OCR_FIELD_LABEL = { name: '名称', code: '代码', action: '方向', quantity: '数量', price: '价格', amount: '金额', fee: '手续费', trade_date: '时间' };
+
+function ocrUid() { return 'ocr' + (++ocrSeq); }
+
+function escapeAttr(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function confSummary(conf) {
+    const lows = Object.entries(conf || {}).filter(([, v]) => v < 0.7).map(([k]) => OCR_FIELD_LABEL[k] || k);
+    return lows.length ? '偏低: ' + lows.join('·') : '完整';
+}
+function labelOf(uid) {
+    const i = ocrRows.findIndex(r => r.uid === uid);
+    return i >= 0 ? i + 1 : '?';
+}
+
+/** 触发文件选择并识别（窗口函数）。kind: 'trade'=交易截图，'holding'=持仓截图 */
+export function startOcrImport(kind = 'trade') {
+    if (!guardEdit()) return;
+    ocrPendingKind = kind === 'holding' ? 'holding' : 'trade';
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+        const file = input.files && input.files[0];
+        if (file) await handleOcrFile(file);
+    };
+    input.click();
+}
+
+async function handleOcrFile(file) {
+    showOcrLoading(ocrPendingKind === 'holding' ? '正在识别持仓截图，请稍候…' : '正在识别交易截图，请稍候…');
+    let data;
+    try {
+        data = await recognizeOcrImage(file, ocrPendingKind);
+    } catch (e) {
+        hideOcrLoading();
+        showToast('❌ ' + (e?.message || '截图识别失败'), 'error', 6000);
+        return;
+    }
+    // 持仓截图：解析成持仓列表 + 截图级字段，走合并/覆盖 + 标色记录 + 写可用资金
+    if (ocrPendingKind === 'holding') {
+        const hrows = (data.rows || []).map(normalizeOcrHolding);
+        if (!hrows.length) {
+            hideOcrLoading();
+            showToast('未识别到持仓记录，请检查截图清晰度', 'warn', 4000);
+            return;
+        }
+        // 反查期间保持遮罩（预览尚未出现），文案切换为匹配中
+        showOcrLoading('正在匹配股票代码与实时价…');
+        await resolveHoldingMeta(hrows);
+        ocrHoldingScreenshot = {
+            available_cash: data.available_cash != null ? Number(data.available_cash) : null,
+            total_assets: data.total_assets != null ? Number(data.total_assets) : null,
+        };
+        ocrHoldingRows = hrows;
+        openOcrHoldingModal();
+        hideOcrLoading();
+        return;
+    }
+    const rows = (data.rows || []).map(normalizeOcrRow);
+    if (!rows.length) {
+        hideOcrLoading();
+        showToast('未识别到交易记录，请检查截图清晰度', 'warn', 4000);
+        return;
+    }
+    // 名称→代码/板块 最佳努力解析（不覆盖用户最终可编辑值）
+    for (const row of rows) {
+        if (row.name && !row.code) {
+            try {
+                const { results } = await searchStocksApi(row.name, 5);
+                const exact = (results || []).find(s => s.name === row.name) || (results || [])[0];
+                if (exact) {
+                    row.code = exact.code || row.code;
+                    if (!row.sector && exact.sector) row.sector = exact.sector;
+                }
+            } catch { /* 静默失败，用户手动填 */ }
+        }
+    }
+    ocrRows = rows;
+    openOcrImportModal();
+    hideOcrLoading();
+}
+
+function normalizeOcrRow(r) {
+    return {
+        uid: ocrUid(),
+        name: r.name || '',
+        code: r.code || '',
+        action: r.action || 'buy',
+        quantity: r.quantity != null ? r.quantity : '',
+        price: r.price != null ? r.price : '',
+        fee: r.fee != null ? r.fee : '',
+        sector: r.sector || '',
+        trade_date: r.trade_date || '',
+        trade_time: r.trade_time || '',
+        conf: r.confidences || {},
+    };
+}
+
+/** 名称失焦：按名称搜索补全代码与板块 */
+async function ocrResolveName(uid) {
+    const row = ocrRows.find(r => r.uid === uid);
+    if (!row) return;
+    const nameEl = document.getElementById('ocrName_' + uid);
+    const name = nameEl?.value.trim();
+    if (!name) return;
+    try {
+        const { results } = await searchStocksApi(name, 5);
+        const exact = (results || []).find(s => s.name === name) || (results || [])[0];
+        if (exact) {
+            const codeEl = document.getElementById('ocrCode_' + uid);
+            const sectorEl = document.getElementById('ocrSector_' + uid);
+            if (codeEl && !codeEl.value) codeEl.value = exact.code || '';
+            if (sectorEl && exact.sector && SECTORS.includes(exact.sector)) sectorEl.value = exact.sector;
+            row.code = codeEl?.value || row.code;
+            if (exact.sector) row.sector = sectorEl?.value || exact.sector;
+        }
+    } catch { /* 静默 */ }
+}
+
+function ocrCardHtml(row) {
+    const low = (f) => (row.conf[f] != null && row.conf[f] < 0.7) ? 'border-amber-400 bg-amber-50/40' : '';
+    return `
+        <div class="ocr-card bg-surface-strong border border-hairline rounded-2xl p-4 mb-3" id="ocrCard_${row.uid}" data-uid="${row.uid}">
+            <div class="flex items-center gap-2 mb-3">
+                <span class="ocr-dot w-2.5 h-2.5 rounded-full bg-muted" id="ocrDot_${row.uid}"></span>
+                <span class="text-xs text-muted font-mono" id="ocrStatus_${row.uid}">待录入</span>
+                <span class="text-[11px] text-muted">置信度 ${confSummary(row.conf)}</span>
+                <label class="ml-auto flex items-center gap-1 text-xs text-muted cursor-pointer">
+                    <input type="checkbox" id="ocrIgnore_${row.uid}"> 忽略
+                </label>
+                <button onclick="ocrDeleteRow('${row.uid}')" class="text-xs text-negative hover:underline ml-1">删除</button>
+            </div>
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">时间</label>
+                    <input id="ocrDate_${row.uid}" value="${escapeAttr((row.trade_date || '') + (row.trade_time ? ' ' + row.trade_time : ''))}" placeholder="YYYY-MM-DD HH:MM" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg ${low('trade_date')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">名称</label>
+                    <input id="ocrName_${row.uid}" value="${escapeAttr(row.name)}" placeholder="如：贵州茅台" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg ${low('name')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">代码</label>
+                    <input id="ocrCode_${row.uid}" value="${escapeAttr(row.code)}" placeholder="600519" maxlength="6" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono ${low('code')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">方向</label>
+                    <select id="ocrAction_${row.uid}" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg ${low('action')}">
+                        <option value="buy" ${row.action === 'buy' ? 'selected' : ''}>买入</option>
+                        <option value="sell" ${row.action === 'sell' ? 'selected' : ''}>卖出</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">数量</label>
+                    <input id="ocrQty_${row.uid}" value="${escapeAttr(row.quantity)}" placeholder="100" type="number" min="1" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono ${low('quantity')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">价格</label>
+                    <input id="ocrPrice_${row.uid}" value="${escapeAttr(row.price)}" placeholder="0.00" type="number" step="0.01" min="0" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono ${low('price')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">手续费</label>
+                    <input id="ocrFee_${row.uid}" value="${escapeAttr(row.fee)}" placeholder="0.00" type="number" step="0.01" min="0" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono ${low('fee')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">板块</label>
+                    <select id="ocrSector_${row.uid}" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg">
+                        ${SECTORS.map(s => `<option value="${s}" ${row.sector === s ? 'selected' : ''}>${s}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+        </div>`;
+}
+
+export function openOcrImportModal() {
+    const modalHtml = `
+        <div id="ocrImportModal" class="fixed inset-0 z-[100]">
+            <div class="absolute inset-0 modal-backdrop" onclick="closeOcrImportModal()"></div>
+            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl mx-4">
+                <div class="bg-canvas rounded-3xl modal-panel overflow-hidden animate-fade-in-up max-h-[92vh] flex flex-col">
+                    <div class="px-6 pt-5 pb-4 relative border-b border-hairline flex items-center">
+                        <button onclick="closeOcrImportModal()" class="absolute top-4 right-4 w-8 h-8 rounded-full bg-surface-strong flex items-center justify-center text-muted hover:text-ink hover:bg-hairline transition-all">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                        <div>
+                            <h3 class="text-lg font-semibold text-ink">截图识别结果预览</h3>
+                            <p class="text-sm text-muted mt-1">共 <span id="ocrCount">${ocrRows.length}</span> 笔待确认 · 请核对后按序导入</p>
+                        </div>
+                    </div>
+
+                    <div id="ocrProgressWrap" class="hidden px-6 pt-3">
+                        <div class="h-2 w-full bg-surface-strong rounded-full overflow-hidden">
+                            <div id="ocrProgressBar" class="h-full bg-primary transition-all duration-300" style="width:0%"></div>
+                        </div>
+                        <p id="ocrProgressText" class="text-xs text-muted mt-1">录入进度 0 / 0</p>
+                    </div>
+
+                    <div id="ocrList" class="px-6 py-4 overflow-y-auto flex-1" style="max-height:60vh">
+                        ${ocrRows.map(ocrCardHtml).join('')}
+                    </div>
+
+                    <div class="px-6 py-4 border-t border-hairline flex gap-3">
+                        <button onclick="closeOcrImportModal()" class="flex-1 px-4 py-3 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors">取消</button>
+                        <button id="ocrImportBtn" onclick="importOcrRows()" class="flex-1 px-4 py-3 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-xl transition-colors shadow-sm shadow-primary/25">确认并按序导入</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    const existing = document.getElementById('ocrImportModal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    document.body.style.overflow = 'hidden';
+    ocrRows.forEach(row => {
+        const nameEl = document.getElementById('ocrName_' + row.uid);
+        if (nameEl) nameEl.addEventListener('blur', () => ocrResolveName(row.uid));
+    });
+}
+
+export function closeOcrImportModal() {
+    const modal = document.getElementById('ocrImportModal');
+    if (modal) modal.remove();
+    document.body.style.overflow = '';
+    ocrRows = [];
+    ocrImporting = false;
+}
+
+export function ocrDeleteRow(uid) {
+    ocrRows = ocrRows.filter(r => r.uid !== uid);
+    const card = document.getElementById('ocrCard_' + uid);
+    if (card) card.remove();
+    const c = document.getElementById('ocrCount');
+    if (c) c.textContent = String(ocrRows.length);
+}
+
+function readOcrRow(uid) {
+    const g = (id) => document.getElementById(id)?.value ?? '';
+    return {
+        uid,
+        name: g('ocrName_' + uid).trim(),
+        code: g('ocrCode_' + uid).trim(),
+        action: g('ocrAction_' + uid),
+        quantity: parseInt(g('ocrQty_' + uid)),
+        price: parseFloat(g('ocrPrice_' + uid)),
+        fee: g('ocrFee_' + uid) ? parseFloat(g('ocrFee_' + uid)) : null,
+        sector: g('ocrSector_' + uid),
+        datetime: g('ocrDate_' + uid).trim(),
+        ignore: document.getElementById('ocrIgnore_' + uid)?.checked || false,
+    };
+}
+
+function markRowError(uid, msg) {
+    const card = document.getElementById('ocrCard_' + uid);
+    if (!card) return;
+    card.classList.add('animate-shake', 'border-negative');
+    const st = document.getElementById('ocrStatus_' + uid);
+    if (st) st.textContent = '校验未过：' + msg;
+    const dot = document.getElementById('ocrDot_' + uid);
+    if (dot) dot.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-negative';
+}
+
+function setProgress(done, total) {
+    const bar = document.getElementById('ocrProgressBar');
+    const txt = document.getElementById('ocrProgressText');
+    if (bar) bar.style.width = total ? (done / total * 100) + '%' : '0%';
+    if (txt) txt.textContent = `录入进度 ${done} / ${total}`;
+}
+
+function fadeOutRow(card) {
+    card.classList.add('animate-ocr-fade-out');
+    card.addEventListener('animationend', () => card.remove(), { once: true });
+}
+
+function buildPayload(r) {
+    const payload = {
+        code: r.code,
+        name: r.name || null,
+        sector: r.sector || null,
+        action: r.action,
+        quantity: r.quantity,
+        price: r.price,
+        from_cash: true,
+        cost_method: 'average',
+    };
+    if (r.fee != null && !isNaN(r.fee)) { payload.fee_mode = 'fixed'; payload.fee_value = r.fee; }
+    if (r.datetime) {
+        const iso = r.datetime.replace(' ', 'T');
+        payload.executed_at = iso.length === 16 ? iso + ':00' : iso;   // YYYY-MM-DDTHH:MM → 补秒
+    }
+    return payload;
+}
+
+async function runSingleImport(uid, currentClient) {
+    const r = readOcrRow(uid);
+    const card = document.getElementById('ocrCard_' + uid);
+    const dot = document.getElementById('ocrDot_' + uid);
+    const status = document.getElementById('ocrStatus_' + uid);
+    if (dot) dot.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-primary animate-pulse-soft';
+    if (status) status.textContent = '录入中…';
+    if (card) card.classList.remove('animate-shake', 'border-negative');
+    const result = await executeAdjustApi(currentClient.id, buildPayload(r));
+    if (card) fadeOutRow(card);
+    return result;
+}
+
+export async function importOcrRows() {
+    if (!guardEdit()) return;
+    if (ocrImporting) return;
+    const currentClient = getCurrentClient();
+    if (!currentClient) { showToast('❌ 未选择客户', 'error'); return; }
+
+    const rows = ocrRows.map(r => readOcrRow(r.uid));
+    const toImport = rows.filter(r => !r.ignore);
+
+    for (const r of toImport) {
+        if (!/^\d{6}$/.test(r.code)) { markRowError(r.uid, '代码须为6位'); showToast(`❌ 第 ${labelOf(r.uid)} 行代码无效`, 'error'); return; }
+        if (r.action !== 'buy' && r.action !== 'sell') { markRowError(r.uid, '方向无效'); showToast(`❌ 第 ${labelOf(r.uid)} 行方向无效`, 'error'); return; }
+        if (!(r.quantity > 0)) { markRowError(r.uid, '数量无效'); showToast(`❌ 第 ${labelOf(r.uid)} 行数量无效`, 'error'); return; }
+        if (!(r.price > 0)) { markRowError(r.uid, '价格无效'); showToast(`❌ 第 ${labelOf(r.uid)} 行价格无效`, 'error'); return; }
+        if (r.action === 'buy' && (!r.name || !r.sector)) { markRowError(r.uid, '买入需名称+板块'); showToast(`❌ 第 ${labelOf(r.uid)} 行买入需补全名称与板块`, 'error'); return; }
+    }
+    if (!toImport.length) { showToast('没有需要导入的记录', 'warn'); return; }
+
+    // 按时间升序（无时间保持原序），逐条录入
+    toImport.sort((a, b) => (a.datetime || '~').localeCompare(b.datetime || '~'));
+
+    ocrImporting = true;
+    document.getElementById('ocrProgressWrap')?.classList.remove('hidden');
+    const total = toImport.length;
+    let done = 0, failed = 0;
+    setProgress(0, total);
+
+    for (const r of toImport) {
+        try {
+            await runSingleImport(r.uid, currentClient);
+            done++;
+        } catch (e) {
+            failed++;
+            const card = document.getElementById('ocrCard_' + r.uid);
+            if (card) {
+                card.classList.add('animate-shake', 'border-negative');
+                const st = document.getElementById('ocrStatus_' + r.uid);
+                if (st) st.innerHTML = '失败：' + escapeHtml(e.message || '未知错误') + ' <button onclick="ocrRetryRow(\'' + r.uid + '\')" class="text-primary underline ml-1">重试</button>';
+                const dot = document.getElementById('ocrDot_' + r.uid);
+                if (dot) dot.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-negative';
+            }
+            showToast(`⚠️ 第 ${labelOf(r.uid)} 行导入失败：${e.message || ''}`, 'error', 5000);
+        }
+        setProgress(done + failed, total);
+    }
+
+    ocrImporting = false;
+    if (failed === 0) {
+        finishImport(done, total, 0);
+    } else {
+        showToast(`导入完成：成功 ${done} / 失败 ${failed}，请重试失败项`, 'warn', 6000);
+        const btn = document.getElementById('ocrImportBtn');
+        if (btn) { btn.textContent = `完成（成功 ${done} / 失败 ${failed}）`; btn.onclick = () => finishImport(done, total, failed); }
+    }
+}
+
+/** 单笔重试（失败行上的「重试」按钮） */
+export async function ocrRetryRow(uid) {
+    if (!guardEdit()) return;
+    const currentClient = getCurrentClient();
+    if (!currentClient) return;
+    try {
+        await runSingleImport(uid, currentClient);
+        showToast('✅ 该笔已导入', 'success');
+        // 若已无失败项，整体收尾
+        setTimeout(() => {
+            if (document.querySelectorAll('.ocr-card.animate-shake').length === 0) {
+                const total = ocrRows.length;
+                finishImport(total, total, 0);
+            }
+        }, 500);
+    } catch (e) {
+        const card = document.getElementById('ocrCard_' + uid);
+        if (card) {
+            card.classList.add('animate-shake', 'border-negative');
+            const st = document.getElementById('ocrStatus_' + uid);
+            if (st) st.innerHTML = '失败：' + escapeHtml(e.message || '未知错误') + ' <button onclick="ocrRetryRow(\'' + uid + '\')" class="text-primary underline ml-1">重试</button>';
+        }
+        showToast('⚠️ 重试失败：' + (e.message || ''), 'error', 5000);
+    }
+}
+
+function finishImport(done, total, failed) {
+    const currentClient = getCurrentClient();
+    if (currentClient) {
+        Promise.all([fetchClientPortfolio(currentClient.id), fetchClientPnlHistory(currentClient.id)])
+            .then(([portfolio, pnlHistory]) => {
+                if (portfolio) {
+                    syncClientState(portfolio);
+                    refreshAll(portfolio, pnlHistory);
+                    renderClientProfile(portfolio);
+                    refreshClientSummaries().catch(() => {});
+                } else {
+                    refreshAll();
+                }
+            })
+            .catch(() => refreshAll());
+    }
+    const bar = document.getElementById('ocrProgressWrap');
+    if (bar) bar.classList.add('hidden');
+    const list = document.getElementById('ocrList');
+    if (list) {
+        list.innerHTML = `
+            <div class="text-center py-10">
+                <div class="text-2xl mb-2">✅</div>
+                <div class="text-sm text-ink">已处理 ${done} 笔${failed ? '，失败 ' + failed + ' 笔' : ''}</div>
+                <div class="text-xs text-muted mt-1">列表已清空</div>
+            </div>`;
+    }
+    showToast(`✅ 已导入 ${done} 笔${failed ? '，' + failed + ' 笔失败' : ''}`, failed ? 'warn' : 'success');
+    const btn = document.getElementById('ocrImportBtn');
+    if (btn) { btn.textContent = '完成'; btn.onclick = () => closeOcrImportModal(); }
+}
+
+// ============================================================
+// 持仓截图识别导入：上传截图 → 预览编辑 → 合并/覆盖持仓 + 按分类打标 + 写可用资金
+// 落库三步：① PUT /positions（合并=按代码合并现有；覆盖=整体替换）
+//           ② 每只生成复盘记录：合并模式按「前态 vs 导入态」分类为 买入/卖出/调整，覆盖模式全为调整
+//           ③ 若截图含可用资金，PUT /clients 写 available_cash（客户总体必要数据；
+//              total_assets 由系统按「可用资金+持仓资产」计算、只读不回写；可用资金不参与任何单只持仓判定）
+// ============================================================
+function ocrHoldingUid() { return 'och' + (++ocrHoldingSeq); }
+
+function normalizeOcrHolding(r) {
+    return {
+        uid: ocrHoldingUid(),
+        name: r.name || '',
+        code: r.code || '',
+        quantity: r.quantity != null ? r.quantity : '',
+        cost_price: r.cost_price != null ? r.cost_price : '',
+        current_price: r.current_price != null ? r.current_price : '',
+        market_value: r.market_value != null ? r.market_value : '',
+        float_pnl: r.float_pnl != null ? r.float_pnl : '',
+        pnl_pct: r.pnl_pct != null ? r.pnl_pct : '',
+        sector: r.sector || '',
+        conf: r.confidences || {},
+    };
+}
+
+// 反查结果回填：代码 / 实时现价 / 板块。截图里的现价一律忽略，改用 API 实时价；
+// 仅当 API 无价（exact.price 缺失）才留空，由持仓列表定时刷新回填。
+function _applyHoldingLookup(row, exact) {
+    if (!exact) return;
+    if (!row.code && exact.code) row.code = exact.code;
+    if (!row.name && exact.name) row.name = exact.name;
+    if (exact.sector) row.sector = exact.sector;
+    if (exact.price != null && !isNaN(parseFloat(exact.price))) row.current_price = exact.price;
+    if (!document.getElementById('ocrHoldingModal')) return; // 预览未打开时不碰 DOM（卡片按 row 渲染）
+    const codeEl = document.getElementById('ocrHCode_' + row.uid);
+    const priceEl = document.getElementById('ocrHPrice_' + row.uid);
+    const sectorEl = document.getElementById('ocrHSector_' + row.uid);
+    if (codeEl && exact.code) codeEl.value = exact.code;
+    if (priceEl && exact.price != null && !isNaN(parseFloat(exact.price))) priceEl.value = exact.price;
+    if (sectorEl && exact.sector && SECTORS.includes(exact.sector)) sectorEl.value = exact.sector;
+    const pnlEl = document.getElementById('ocrHPnl_' + row.uid);
+    if (pnlEl) pnlEl.innerHTML = holdingPnlInner(row);
+}
+
+async function resolveHoldingMeta(rows) {
+    for (const row of rows) {
+        try {
+            let exact = null;
+            if (row.code) {
+                const { results } = await searchStocksApi(row.code, 5);
+                exact = (results || []).find(s => s.code === row.code) || (results || [])[0];
+            } else if (row.name) {
+                const { results } = await searchStocksApi(row.name, 5);
+                exact = (results || []).find(s => s.name === row.name) || (results || [])[0];
+            }
+            _applyHoldingLookup(row, exact);
+        } catch { /* 静默失败，用户手动填 */ }
+    }
+}
+
+function labelOfHolding(uid) {
+    const i = ocrHoldingRows.findIndex(r => r.uid === uid);
+    return i >= 0 ? i + 1 : '?';
+}
+
+// 预览盈亏：由 成本价 / 现价 / 股数 计算（不采用 OCR 抽出的盈亏值），与 overview.js 口径一致。
+// 三项任一缺失 → 返回 null（调用方显示「—/待刷新」）。A股惯例：盈利红、亏损绿。
+function computeHoldingPnl(row) {
+    const cp = parseFloat(row.cost_price);
+    const px = parseFloat(row.current_price);
+    const qty = parseFloat(row.quantity);
+    if (!(cp >= 0) || !(px >= 0) || !(qty > 0)) return null;
+    const pnl = (px - cp) * qty;
+    const pct = cp > 0 ? (px - cp) / cp * 100 : 0;
+    return { pnl, pct };
+}
+function holdingPnlInner(row) {
+    const r = computeHoldingPnl(row);
+    if (!r) return '<span class="text-muted">盈亏 —/待刷新</span>';
+    const color = r.pnl > 0 ? 'text-rose-500' : (r.pnl < 0 ? 'text-emerald-500' : 'text-muted');
+    const sign = r.pnl > 0 ? '+' : '';
+    return `<span class="${color}">盈亏 ${sign}${formatNumber(r.pnl)} (${sign}${r.pct.toFixed(2)}%)</span>`;
+}
+// 用户手动改 股数/成本价 时实时重算预览盈亏
+export function recomputeHoldingPnl(uid) {
+    const row = { quantity: '', cost_price: '', current_price: '' };
+    const q = document.getElementById('ocrHQty_' + uid);
+    const c = document.getElementById('ocrHCost_' + uid);
+    const p = document.getElementById('ocrHPrice_' + uid);
+    if (q) row.quantity = q.value;
+    if (c) row.cost_price = c.value;
+    if (p) row.current_price = p.value;
+    const el = document.getElementById('ocrHPnl_' + uid);
+    if (el) el.innerHTML = holdingPnlInner(row);
+}
+
+function ocrHoldingCardHtml(row) {
+    const low = (f) => (row.conf[f] != null && row.conf[f] < 0.7) ? 'border-amber-400 bg-amber-50/40' : '';
+    const pnlHint = `<span id="ocrHPnl_${row.uid}" class="text-[11px]">${holdingPnlInner(row)}</span>`;
+    return `
+        <div class="ocr-card bg-surface-strong border border-hairline rounded-2xl p-4 mb-3" id="ocrHCard_${row.uid}" data-uid="${row.uid}">
+            <div class="flex items-center gap-2 mb-3">
+                <span class="ocr-dot w-2.5 h-2.5 rounded-full bg-muted" id="ocrHDot_${row.uid}"></span>
+                <span class="text-xs text-muted font-mono" id="ocrHStatus_${row.uid}">待确认</span>
+                <span class="text-[11px] text-muted">置信度 ${confSummary(row.conf)}</span>
+                ${pnlHint}
+                <label class="ml-auto flex items-center gap-1 text-xs text-muted cursor-pointer">
+                    <input type="checkbox" id="ocrHIgnore_${row.uid}"> 忽略
+                </label>
+                <button onclick="ocrHoldingDeleteRow('${row.uid}')" class="text-xs text-negative hover:underline ml-1">删除</button>
+            </div>
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">名称</label>
+                    <input id="ocrHName_${row.uid}" value="${escapeAttr(row.name)}" placeholder="如：贵州茅台" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg ${low('name')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">代码</label>
+                    <input id="ocrHCode_${row.uid}" value="${escapeAttr(row.code)}" placeholder="600519" maxlength="6" readonly class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono text-muted ${low('code')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">持仓数量</label>
+                    <input id="ocrHQty_${row.uid}" value="${escapeAttr(row.quantity)}" placeholder="100" type="number" min="1" oninput="recomputeHoldingPnl('${row.uid}')" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono ${low('quantity')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">成本价</label>
+                    <input id="ocrHCost_${row.uid}" value="${escapeAttr(row.cost_price)}" placeholder="0.00" type="number" step="0.01" min="0" oninput="recomputeHoldingPnl('${row.uid}')" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono ${low('cost_price')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">现价（选填）</label>
+                    <input id="ocrHPrice_${row.uid}" value="${escapeAttr(row.current_price)}" placeholder="—/待刷新" type="number" step="0.01" min="0" readonly class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg font-mono text-muted ${low('current_price')}">
+                </div>
+                <div>
+                    <label class="block text-[11px] text-muted mb-1">板块</label>
+                    <select id="ocrHSector_${row.uid}" class="w-full px-2 py-1.5 text-sm bg-canvas border border-hairline rounded-lg">
+                        ${SECTORS.map(s => `<option value="${s}" ${row.sector === s ? 'selected' : ''}>${s}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+        </div>`;
+}
+
+export function openOcrHoldingModal() {
+    const cash = ocrHoldingScreenshot.available_cash;
+    const assets = ocrHoldingScreenshot.total_assets;
+    const fmt = (v) => '¥' + Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const metaBanner = (cash != null || assets != null)
+        ? `<div class="mx-6 mt-3 p-3 rounded-xl bg-surface-soft border border-hairline text-sm text-muted">
+               截图账户信息：
+               ${cash != null ? `可用资金 <span class="text-ink font-mono">${fmt(cash)}</span>` : ''}
+               ${cash != null && assets != null ? ' · ' : ''}
+               ${assets != null ? `总资产 <span class="text-ink font-mono">${fmt(assets)}</span>` : ''}
+               ${cash != null ? '<div class="mt-1 text-[11px]">导入后将写入客户「可用资金」；总资产为只读参考（系统按 持仓市值+可用资金 计算，不回写）。</div>' : ''}
+           </div>`
+        : '';
+    const mode = ocrHoldingMergeMode; // 默认 merge（合并）
+    const modalHtml = `
+        <div id="ocrHoldingModal" class="fixed inset-0 z-[100]">
+            <div class="absolute inset-0 modal-backdrop" onclick="closeOcrHoldingModal()"></div>
+            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl mx-4">
+                <div class="bg-canvas rounded-3xl modal-panel overflow-hidden animate-fade-in-up max-h-[92vh] flex flex-col">
+                    <div class="px-6 pt-5 pb-4 relative border-b border-hairline">
+                        <button onclick="closeOcrHoldingModal()" class="absolute top-4 right-4 w-8 h-8 rounded-full bg-surface-strong flex items-center justify-center text-muted hover:text-ink hover:bg-hairline transition-all">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                        <div>
+                            <h3 class="text-lg font-semibold text-ink">持仓截图识别预览</h3>
+                            <p id="ocrHSub" class="text-sm text-muted mt-1">共 <span id="ocrHCount">${ocrHoldingRows.length}</span> 只待确认 · 导入将<span class="${mode === 'merge' ? 'text-primary' : 'text-negative'} font-medium">${mode === 'merge' ? '合并' : '整体替换'}</span>当前持仓并生成「调整」记录</p>
+                            <div class="flex flex-wrap items-center gap-2 mt-2">
+                                <span class="text-xs text-muted">导入方式</span>
+                                <div class="inline-flex rounded-lg bg-surface-strong p-0.5 text-xs font-medium" id="ocrModeToggle">
+                                    <button type="button" data-mode="merge" class="px-3 py-1 rounded-md transition-colors ${mode === 'merge' ? 'bg-primary text-white' : 'text-muted hover:text-ink'}">合并持仓</button>
+                                    <button type="button" data-mode="overwrite" class="px-3 py-1 rounded-md transition-colors ${mode === 'overwrite' ? 'bg-negative text-white' : 'text-muted hover:text-ink'}">覆盖持仓</button>
+                                </div>
+                                <span id="ocrModeHint" class="text-[11px] text-muted">${mode === 'merge' ? '按代码合并：新增/覆盖，未涉及保留' : '整体替换：截图未涉及的原有持仓会被清除'}</span>
+                            </div>
+                        </div>
+                    </div>
+                    ${metaBanner}
+                    <div id="ocrHoldingProgressWrap" class="hidden px-6 pt-3">
+                        <div class="h-2 w-full bg-surface-strong rounded-full overflow-hidden">
+                            <div id="ocrHoldingProgressBar" class="h-full bg-primary transition-all duration-300" style="width:0%"></div>
+                        </div>
+                        <p id="ocrHoldingProgressText" class="text-xs text-muted mt-1">录入进度 0 / 0</p>
+                    </div>
+                    <div id="ocrHoldingList" class="px-6 py-4 overflow-y-auto flex-1" style="max-height:60vh">
+                        ${ocrHoldingRows.map(ocrHoldingCardHtml).join('')}
+                    </div>
+                    <div class="px-6 py-4 border-t border-hairline flex gap-3">
+                        <button onclick="closeOcrHoldingModal()" class="flex-1 px-4 py-3 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors">取消</button>
+                        <button id="ocrHoldingImportBtn" onclick="importOcrHoldings()" class="flex-1 px-4 py-3 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-xl transition-colors shadow-sm shadow-primary/25">确认并${mode === 'merge' ? '合并持仓' : '整体更新持仓'}</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    const existing = document.getElementById('ocrHoldingModal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    document.body.style.overflow = 'hidden';
+
+    // 导入方式切换：切到覆盖需二次确认（整体替换有破坏性）
+    const toggle = document.getElementById('ocrModeToggle');
+    if (toggle) {
+        toggle.querySelectorAll('button[data-mode]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const next = btn.getAttribute('data-mode');
+                if (next === ocrHoldingMergeMode) return;
+                if (next === 'overwrite') {
+                    const ok = confirm('覆盖持仓将「整体替换」该客户全部持仓，截图未包含的原有持仓会被清除（不可恢复）。\n确定切换到覆盖模式吗？');
+                    if (!ok) return; // 维持合并
+                }
+                ocrHoldingMergeMode = next;
+                updateHoldingModeUI();
+            });
+        });
+    }
+
+    ocrHoldingRows.forEach(row => {
+        const nameEl = document.getElementById('ocrHName_' + row.uid);
+        if (nameEl) {
+            nameEl.addEventListener('blur', () => ocrResolveHoldingName(row.uid));
+            // 名称输入即时反查（防抖 400ms）：回填代码+实时现价+板块
+            let t;
+            nameEl.addEventListener('input', () => {
+                clearTimeout(t);
+                t = setTimeout(() => ocrResolveHoldingName(row.uid), 400);
+            });
+        }
+    });
+}
+
+// 同步 toggle / 副标题 / 按钮文案 到当前 ocrHoldingMergeMode
+function updateHoldingModeUI() {
+    const toggle = document.getElementById('ocrModeToggle');
+    if (toggle) toggle.querySelectorAll('button[data-mode]').forEach(b => {
+        const m = b.getAttribute('data-mode');
+        const active = m === ocrHoldingMergeMode;
+        b.className = 'px-3 py-1 rounded-md transition-colors ' + (active ? (m === 'merge' ? 'bg-primary text-white' : 'bg-negative text-white') : 'text-muted hover:text-ink');
+    });
+    const hint = document.getElementById('ocrModeHint');
+    if (hint) hint.textContent = ocrHoldingMergeMode === 'merge' ? '按代码合并：新增/覆盖，未涉及保留' : '整体替换：截图未涉及的原有持仓会被清除';
+    const sub = document.getElementById('ocrHSub');
+    if (sub) sub.innerHTML = `共 <span id="ocrHCount">${ocrHoldingRows.length}</span> 只待确认 · 导入将<span class="${ocrHoldingMergeMode === 'merge' ? 'text-primary' : 'text-negative'} font-medium">${ocrHoldingMergeMode === 'merge' ? '合并' : '整体替换'}</span>当前持仓并生成「调整」记录`;
+    const btn = document.getElementById('ocrHoldingImportBtn');
+    if (btn) btn.textContent = '确认并' + (ocrHoldingMergeMode === 'merge' ? '合并持仓' : '整体更新持仓');
+}
+
+export function closeOcrHoldingModal() {
+    const modal = document.getElementById('ocrHoldingModal');
+    if (modal) modal.remove();
+    document.body.style.overflow = '';
+    ocrHoldingRows = [];
+    ocrHoldingImporting = false;
+}
+
+// ============================================================
+// OCR 识别加载遮罩（独立于 #toast，避免被「大盘数据刷新成功」等周期 toast 覆盖）
+// 全屏半透明背景拦截点击 = 识别期间禁用用户其他操作。
+// ============================================================
+export function showOcrLoading(msg = '正在识别截图，请稍候…') {
+    hideOcrLoading();
+    const el = document.createElement('div');
+    el.id = 'ocrLoadingOverlay';
+    el.className = 'fixed inset-0 z-[200] flex items-center justify-center';
+    el.innerHTML = `
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
+        <div class="relative bg-canvas rounded-3xl shadow-2xl px-10 py-8 flex flex-col items-center gap-4 max-w-xs mx-4 animate-fade-in-up">
+            <div class="w-14 h-14 rounded-full border-4 border-primary/30 border-t-primary animate-spin"></div>
+            <div id="ocrLoadingText" class="text-base font-medium text-ink text-center">${msg}</div>
+            <div class="text-xs text-muted">识别期间请勿进行其他操作</div>
+        </div>`;
+    document.body.appendChild(el);
+}
+
+export function hideOcrLoading() {
+    document.getElementById('ocrLoadingOverlay')?.remove();
+}
+
+export function ocrHoldingDeleteRow(uid) {
+    ocrHoldingRows = ocrHoldingRows.filter(r => r.uid !== uid);
+    const card = document.getElementById('ocrHCard_' + uid);
+    if (card) card.remove();
+    const c = document.getElementById('ocrHCount');
+    if (c) c.textContent = String(ocrHoldingRows.length);
+}
+
+async function ocrResolveHoldingName(uid) {
+    const row = ocrHoldingRows.find(r => r.uid === uid);
+    if (!row) return;
+    const nameEl = document.getElementById('ocrHName_' + uid);
+    const name = nameEl?.value.trim();
+    if (!name) return;
+    // 反查中标记
+    const dot = document.getElementById('ocrHDot_' + uid);
+    const st = document.getElementById('ocrHStatus_' + uid);
+    if (dot) dot.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-primary animate-pulse-soft';
+    if (st) st.textContent = '反查中…';
+    try {
+        const { results } = await searchStocksApi(name, 5);
+        const exact = (results || []).find(s => s.name === name) || (results || [])[0];
+        if (exact) {
+            _applyHoldingLookup(row, exact);
+        } else {
+            // 名称搜不到代码 → 清空代码/现价，导入前校验会拦下，提示改名或忽略
+            row.code = '';
+            row.current_price = '';
+            const codeEl = document.getElementById('ocrHCode_' + uid);
+            if (codeEl) codeEl.value = '';
+            const priceEl = document.getElementById('ocrHPrice_' + uid);
+            if (priceEl) priceEl.value = '';
+            if (dot) dot.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-negative';
+            if (st) st.textContent = '未匹配代码，请改名或勾选「忽略」';
+        }
+    } catch { /* 静默 */ }
+    finally {
+        if (dot) dot.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-muted';
+        if (st) st.textContent = '待确认';
+    }
+}
+
+function readOcrHoldingRow(uid) {
+    const g = (id) => document.getElementById(id)?.value ?? '';
+    return {
+        uid,
+        name: g('ocrHName_' + uid).trim(),
+        code: g('ocrHCode_' + uid).trim(),
+        quantity: parseInt(g('ocrHQty_' + uid)),
+        cost_price: g('ocrHCost_' + uid).trim(),
+        current_price: g('ocrHPrice_' + uid).trim(),
+        sector: g('ocrHSector_' + uid),
+        ignore: document.getElementById('ocrHIgnore_' + uid)?.checked || false,
+    };
+}
+
+function markHoldingRowError(uid, msg) {
+    const card = document.getElementById('ocrHCard_' + uid);
+    if (!card) return;
+    card.classList.add('animate-shake', 'border-negative');
+    const st = document.getElementById('ocrHStatus_' + uid);
+    if (st) st.textContent = '校验未过：' + msg;
+    const dot = document.getElementById('ocrHDot_' + uid);
+    if (dot) dot.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-negative';
+}
+
+function setHoldingProgress(done, total) {
+    const bar = document.getElementById('ocrHoldingProgressBar');
+    const txt = document.getElementById('ocrHoldingProgressText');
+    if (bar) bar.style.width = total ? (done / total * 100) + '%' : '0%';
+    if (txt) txt.textContent = `录入进度 ${done} / ${total}`;
+}
+
+// 从若干候选价中取第一个有限且 >0 的值（后端 price 要求 >0）；都没有返回 null
+function posPrice(...vals) {
+    for (const v of vals) {
+        const n = parseFloat(v);
+        if (isFinite(n) && n > 0) return n;
+    }
+    return null;
+}
+
+export async function importOcrHoldings() {
+    if (!guardEdit()) return;
+    if (ocrHoldingImporting) return;
+    const currentClient = getCurrentClient();
+    if (!currentClient) { showToast('❌ 未选择客户', 'error'); return; }
+
+    const rows = ocrHoldingRows.map(r => readOcrHoldingRow(r.uid));
+    const toImport = rows.filter(r => !r.ignore);
+
+    for (const r of toImport) {
+        if (!/^\d{6}$/.test(r.code)) { markHoldingRowError(r.uid, '代码须为6位'); showToast(`❌ 第 ${labelOfHolding(r.uid)} 行代码无效`, 'error'); return; }
+        if (!(r.quantity > 0)) { markHoldingRowError(r.uid, '数量无效'); showToast(`❌ 第 ${labelOfHolding(r.uid)} 行数量无效`, 'error'); return; }
+        const cp = parseFloat(r.cost_price);
+        if (r.cost_price === '' || isNaN(cp) || cp < 0) { markHoldingRowError(r.uid, '成本价无效'); showToast(`❌ 第 ${labelOfHolding(r.uid)} 行成本价无效`, 'error'); return; }
+    }
+    if (!toImport.length) { showToast('没有需要导入的持仓', 'warn'); return; }
+
+    // 模式相关确认：合并 → 提示将保留未涉及持仓；覆盖 → 提示将整体替换
+    let confirmMsg;
+    if (ocrHoldingMergeMode === 'merge') {
+        confirmMsg = '持仓截图将以「合并」方式导入：\n· 按代码新增/覆盖持仓（覆盖项数量、成本价、板块一律以截图为准）\n· 未涉及的原有持仓予以保留\n· 按分类生成复盘记录：新增/加仓=买入(红)，减仓=卖出(绿)，仅成本价变=调整(黄)；完全未变的持仓跳过\n\n确定继续吗？';
+    } else {
+        confirmMsg = '持仓截图导入将「整体替换」当前客户持仓（未涉及的原有持仓将被清空），并为每只股票生成一条「调整」复盘记录。\n确定继续吗？';
+    }
+    const ok = confirm(confirmMsg);
+    if (!ok) return;
+
+    ocrHoldingImporting = true;
+    document.getElementById('ocrHoldingProgressWrap')?.classList.remove('hidden');
+    const total = toImport.length;
+    setHoldingProgress(0, total);
+
+    try {
+        // 导入前持仓（前态），用于合并模式分类；必须在写入前捕获
+        const prevByCode = new Map((currentClient.positions || []).map(p => [p.code, p]));
+        // ① 组装持仓 payload（覆盖=仅截图集；合并=按代码合并现有持仓）
+        let positionsPayload;
+        if (ocrHoldingMergeMode === 'merge') {
+            const existing = (currentClient.positions || []).map(p => ({
+                name: p.name,
+                code: p.code,
+                sector: p.sector,
+                quantity: p.quantity,
+                cost_price: parseFloat(p.costPrice) || 0,
+            }));
+            const byCode = new Map(existing.map(p => [p.code, p]));
+            for (const r of toImport) {
+                byCode.set(r.code, {
+                    name: r.name || r.code,
+                    code: r.code,
+                    sector: SECTORS.includes(r.sector) ? r.sector : '其他',
+                    quantity: r.quantity,
+                    cost_price: parseFloat(r.cost_price),
+                });
+            }
+            positionsPayload = [...byCode.values()];
+        } else {
+            positionsPayload = toImport.map(r => ({
+                name: r.name || r.code,
+                code: r.code,
+                sector: SECTORS.includes(r.sector) ? r.sector : '其他',
+                quantity: r.quantity,
+                cost_price: parseFloat(r.cost_price),
+            }));
+        }
+        await updateClientPositions(currentClient.id, positionsPayload);
+
+        // ② 生成复盘记录：合并模式按「前态 vs 导入态」分类打标，覆盖模式维持全黄「调整」
+        //    可用资金不参与任何单只持仓判定（仅客户总体数据，见③）。
+        //    记录数量=交易差额（加仓=增持数、减仓=减持数；新增无前态→全额；仅成本变/覆盖→全量）。
+        //    成交价：新增=成本价；加仓=由成本+股数精确反推；减仓=快照现价（日均刷新→误差小）；均保证 >0。
+        const records = [];
+        for (const r of toImport) {
+            const cp = parseFloat(r.cost_price) || 0;
+            const pxRaw = (r.current_price !== '' && !isNaN(parseFloat(r.current_price))) ? parseFloat(r.current_price) : null;
+            let action = 'adjust';
+            let price = null;
+            // 复盘记录数量=交易差额（非持仓全量）；新增无前态→差额=全量，仅成本变/覆盖→全量
+            let qty = r.quantity;
+            if (ocrHoldingMergeMode === 'merge') {
+                const prev = prevByCode.get(r.code);
+                if (!prev) {
+                    action = 'buy';                                   // 新增（差额=全量）
+                    price = posPrice(cp) || 0.01;
+                } else {
+                    const qtyOld = prev.quantity;
+                    const costOld = parseFloat(prev.costPrice) || 0;
+                    const qtyNew = r.quantity;
+                    const costNew = cp;
+                    if (qtyNew > qtyOld) {
+                        // 加仓：成交价由成本+股数反推；数量=差额
+                        const dq = qtyNew - qtyOld;
+                        const buyPrice = (qtyNew * costNew - qtyOld * costOld) / dq;
+                        action = 'buy';
+                        qty = dq;
+                        price = posPrice(buyPrice, costNew) || 0.01;
+                    } else if (qtyNew < qtyOld) {
+                        // 减仓：均价法下成本不变无法反推，成交价取快照现价；数量=差额
+                        action = 'sell';
+                        qty = qtyOld - qtyNew;
+                        price = posPrice(pxRaw, costNew) || 0.01;
+                    } else if (costNew !== costOld) {
+                        // 仅成本价变（股数同）：调整，数量用全量
+                        action = 'adjust';
+                        price = posPrice(costNew) || 0.01;
+                    } else {
+                        // 完全未变：跳过，不生成记录
+                        continue;
+                    }
+                }
+            } else {
+                action = 'adjust';                                 // 覆盖模式维持原行为（全量）
+                price = posPrice(pxRaw, cp) || 0.01;
+            }
+            records.push({
+                code: r.code,
+                name: r.name || r.code,
+                quantity: qty,
+                price,
+                cost_price: cp,
+                trade_date: new Date().toISOString().slice(0, 10),
+                action,
+            });
+        }
+        for (const rec of records) {
+            await createAdjustRecord(currentClient.id, {
+                code: rec.code,
+                name: rec.name,
+                quantity: rec.quantity,
+                price: rec.price,
+                cost_price: rec.cost_price,
+                trade_date: rec.trade_date,
+            }, rec.action);
+        }
+
+        // ③ 可用资金（截图有则写入，属客户总体必要数据；total_assets 由系统按「可用资金+持仓资产」计算、不回写）
+        if (ocrHoldingScreenshot.available_cash != null) {
+            await updateClientRemote(currentClient.id, { available_cash: ocrHoldingScreenshot.available_cash });
+        }
+
+        const done = records.length;
+        setHoldingProgress(done, done);
+        finishHoldingImport(done);
+    } catch (e) {
+        ocrHoldingImporting = false;
+        showToast('❌ 持仓导入失败：' + (e?.message || '未知错误'), 'error', 6000);
+    }
+}
+
+function finishHoldingImport(done) {
+    const currentClient = getCurrentClient();
+    if (currentClient) {
+        Promise.all([fetchClientPortfolio(currentClient.id), fetchClientPnlHistory(currentClient.id)])
+            .then(([portfolio, pnlHistory]) => {
+                if (portfolio) {
+                    syncClientState(portfolio);
+                    refreshAll(portfolio, pnlHistory);
+                    renderClientProfile(portfolio);
+                    refreshClientSummaries().catch(() => {});
+                } else {
+                    refreshAll();
+                }
+            })
+            .catch(() => refreshAll());
+    }
+    const bar = document.getElementById('ocrHoldingProgressWrap');
+    if (bar) bar.classList.add('hidden');
+    const list = document.getElementById('ocrHoldingList');
+    if (list) {
+        list.innerHTML = `
+            <div class="text-center py-10">
+                <div class="text-2xl mb-2">✅</div>
+                <div class="text-sm text-ink">已更新 ${done} 只持仓</div>
+                <div class="text-xs text-muted mt-1">列表已清空</div>
+            </div>`;
+    }
+    const modeLabel = ocrHoldingMergeMode === 'merge' ? '合并更新' : '整体替换';
+    showToast(`✅ 已${modeLabel} ${done} 只持仓${ocrHoldingScreenshot.available_cash != null ? '，可用资金已写入' : ''}`, 'success');
+    const btn = document.getElementById('ocrHoldingImportBtn');
+    if (btn) { btn.textContent = '完成'; btn.onclick = () => closeOcrHoldingModal(); }
 }
