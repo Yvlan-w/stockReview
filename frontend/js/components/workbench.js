@@ -197,6 +197,7 @@ export function renderClientProfile(portfolio = portfolioData) {
     if (!c) { el.innerHTML = ''; return; }
     const s = computePortfolioStats(portfolio);
     const rel = getClientRelations(c);
+    // 客户概览卡片「总盈亏」= 浮动 + 已实现（累计口径），故用 totalPnl 判定颜色
     const pnlColor = s.totalPnl >= 0 ? 'text-up' : 'text-down';
     const canManage = canCreateClient();
     el.innerHTML = `
@@ -231,7 +232,7 @@ export function renderClientProfile(portfolio = portfolioData) {
                 </div>
             </div>
             <div class="ml-auto w-full sm:w-auto flex flex-col items-stretch sm:items-end gap-3">
-                <!-- 第一行：总资产 + 持仓盈亏 卡片 -->
+                <!-- 第一行：总资产 + 总盈亏 卡片（总盈亏 = 浮动盈亏 + 已实现盈亏，累计口径） -->
                 <!-- 两处金额统一走 formatCompactAmount：|值|≥10000 用「万」（1 位小数、去尾 0），
                      否则保持 ¥ + 千分位 + 2 位小数；负值保留负号（-¥1.2万）。
                      whitespace-nowrap 保证数值不换行、不溢出、两卡片宽度稳定不错位 -->
@@ -241,7 +242,7 @@ export function renderClientProfile(portfolio = portfolioData) {
                         <div class="font-mono text-2xl font-semibold text-ink whitespace-nowrap">${formatCompactAmount(s.totalAssets)}</div>
                     </div>
                     <div class="text-right">
-                        <div class="text-xs text-muted">持仓盈亏</div>
+                        <div class="text-xs text-muted">总盈亏</div>
                         <div class="font-mono text-2xl font-semibold ${pnlColor} whitespace-nowrap">${formatCompactAmount(s.totalPnl, { sign: true })}</div>
                     </div>
                 </div>

@@ -106,6 +106,9 @@ export function computePortfolioStats(portfolio) {
             totalCost: portfolio.totalCost || 0,
             totalPnl: portfolio.totalPnl || 0,
             totalPnlPct: portfolio.totalPnlPct || 0,
+            // 持仓盈亏仅取浮动盈亏（不含已实现），与「持仓概览」展示口径一致
+            floatingPnl: portfolio.totalFloatingPnl || 0,
+            floatingPnlPct: portfolio.floatingPnlPct || 0,
             availableCash: portfolio.availableCash || 0,
             totalAssets: portfolio.totalAssets || 0,
             todayPnl: portfolio.todayPnl || 0,
@@ -126,6 +129,8 @@ export function computePortfolioStats(portfolio) {
     const todayPnlPct = totalAssets > 0 ? (todayPnl / (totalAssets - todayPnl)) * 100 : 0;
     return {
         totalMarketValue, totalCost, totalPnl, totalPnlPct,
+        // 本地降级（无实时 portfolio）时无已实现概念，浮动盈亏等同累计盈亏
+        floatingPnl: totalPnl, floatingPnlPct: totalPnlPct,
         availableCash, totalAssets, todayPnl, todayPnlPct,
     };
 }

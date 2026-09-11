@@ -75,8 +75,9 @@ export function renderStatsCards(portfolio) {
     const s = computePortfolioStats(portfolio);
     const totalMarketValue = s.totalMarketValue;
     const totalCost = s.totalCost;
-    const totalPnL = s.totalPnl;
-    const totalPnLPct = s.totalPnlPct;
+    // 持仓盈亏：仅浮动盈亏（已实现盈亏已移至「策略复盘」展示，此处剔除）
+    const totalPnL = s.floatingPnl;
+    const totalPnLPct = s.floatingPnlPct;
     const availableCash = s.availableCash;
     const totalAssets = s.totalAssets;
     const todayPnL = s.todayPnl;
