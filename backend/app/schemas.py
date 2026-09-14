@@ -366,6 +366,7 @@ class AdjustRequest(BaseModel):
     executed_at: Optional[datetime] = None  # 人为指定交易时间；不传则用服务器当前时间
     from_cash: bool = True
     cost_method: str = Field("average", pattern="^(average|fifo|lifo)$")
+    skip_if_duplicate: bool = False  # 导入场景：若同客户已存在「代码/名称+方向+数量+价格+时间」完全一致的交易则跳过写入
 
     @model_validator(mode="after")
     def _validate_fee(self):

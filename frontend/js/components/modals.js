@@ -1193,10 +1193,94 @@ export async function revokePosition(code) {
 // 落库复用既有 executeAdjustApi（POST /api/clients/{id}/adjust），逐笔原子事务，
 // 因此无需在此重复实现持仓/现金/成本批次/Tier2 更新逻辑。
 // ============================================================
-let ocrRows = [];          // 当前预览的可编辑行：{uid,name,code,action,quantity,price,fee,sector,trade_date,trade_time,conf}
+let ocrRows = [];          // 当前预览的可编辑行：{uid,name,code,action,quantity,price,fee,sector,trade_date,trade_time,datetime,conf}
 let ocrImporting = false;
 let ocrSeq = 0;
 let ocrPendingKind = 'trade';   // 待识别截图类型：trade=交易，holding=持仓
+let ocrBatchActive = false;     // 交易导入批次是否处于「已开启、可继续追加截图」状态
+
+// ---- 多张交易截图去重（跨截图） ----
+// 判定键：交易时间 + 股票 + 买卖方向 + 数量 + 价格 五个字段完全一致即视为同一笔。
+// 股票优先取 6 位代码；无代码（如同花顺历史成交）则退化为名称。其余字段逐一精确比较。
+function ocrNormalizeDatetime(r) {
+  let dt = (r.datetime || '').trim();
+  if (!dt) {
+    const d = (r.trade_date || '').trim();
+    const t = (r.trade_time || '').trim();
+    dt = (d + ' ' + t).trim();
+  }
+  return dt.replace(/\s+/g, ' ');
+}
+function ocrDupKey(r) {
+  const stock = (r.code && /^\d{6}$/.test(String(r.code).trim()))
+    ? String(r.code).trim()
+    : String(r.name || '').trim();
+  const dt = ocrNormalizeDatetime(r);
+  const q = (r.quantity == null || r.quantity === '') ? '' : String(r.quantity);
+  const p = (r.price == null || r.price === '') ? '' : String(r.price);
+  return [stock, r.action || '', q, p, dt].join('');
+}
+/** 把当前 DOM 中已编辑的值回写到 ocrRows，使去重/重渲染基于用户最终值。*/
+function syncOcrRowEdits() {
+  ocrRows = ocrRows.map(r => {
+    const card = document.getElementById('ocrCard_' + r.uid);
+    if (!card) return r;
+    const g = (id) => document.getElementById(id)?.value ?? '';
+    const qv = g('ocrQty_' + r.uid);
+    const pv = g('ocrPrice_' + r.uid);
+    const fv = g('ocrFee_' + r.uid);
+    return {
+      ...r,
+      name: g('ocrName_' + r.uid).trim(),
+      code: g('ocrCode_' + r.uid).trim(),
+      action: g('ocrAction_' + r.uid),
+      quantity: qv === '' ? '' : parseInt(qv, 10),
+      price: pv === '' ? '' : parseFloat(pv),
+      fee: fv ? parseFloat(fv) : '',
+      sector: g('ocrSector_' + r.uid),
+      datetime: g('ocrDate_' + r.uid).trim(),
+      ignore: document.getElementById('ocrIgnore_' + r.uid)?.checked || false,
+    };
+  });
+}
+/** 跨截图去重：保留首次出现的记录，返回被移除的条数。*/
+function dedupeOcrRows() {
+  const seen = new Set();
+  const kept = [];
+  let removed = 0;
+  for (const r of ocrRows) {
+    const key = ocrDupKey(r);
+    if (seen.has(key)) { removed++; continue; }
+    seen.add(key);
+    kept.push(r);
+  }
+  ocrRows = kept;
+  return removed;
+}
+/** 依据最新 ocrRows 重渲染预览列表（保留已编辑值），并更新计数。*/
+function rebuildOcrList() {
+  const list = document.getElementById('ocrList');
+  if (list) list.innerHTML = ocrRows.map(ocrCardHtml).join('');
+  const c = document.getElementById('ocrCount');
+  if (c) c.textContent = String(ocrRows.length);
+  ocrRows.forEach(row => {
+    const nameEl = document.getElementById('ocrName_' + row.uid);
+    if (nameEl) nameEl.addEventListener('blur', () => ocrResolveName(row.uid));
+  });
+}
+/** 在已开启的交易导入批次中追加更多截图（跨截图去重入口）。*/
+export function addOcrScreenshots() {
+  if (!guardEdit()) return;
+  if (!ocrBatchActive) return;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (file) await handleOcrFile(file);
+  };
+  input.click();
+}
 
 // 持仓截图预览状态（与交易截图流程相互独立，避免相互污染）
 let ocrHoldingRows = [];          // [{uid,name,code,quantity,cost_price,current_price,market_value,float_pnl,pnl_pct,sector,conf}]
@@ -1287,8 +1371,23 @@ async function handleOcrFile(file) {
             } catch { /* 静默失败，用户手动填 */ }
         }
     }
+    // 批次已开启：将新截图识别出的交易追加进当前批次，并执行跨截图去重。
+    if (ocrBatchActive) {
+        syncOcrRowEdits();                 // 先回写用户已编辑的值
+        ocrRows = ocrRows.concat(rows);    // 追加
+        const removed = dedupeOcrRows();    // 按五字段去重（保留首条）
+        rebuildOcrList();                   // 重渲染列表（保留已编辑值）
+        hideOcrLoading();
+        if (removed > 0) {
+            showToast(`已自动去除 ${removed} 条重复交易（同一笔出现在多张截图）`, 'success', 4500);
+        } else {
+            showToast(`已追加 ${rows.length} 笔，当前共 ${ocrRows.length} 笔待确认`, 'success', 3000);
+        }
+        return;
+    }
     ocrRows = rows;
     openOcrImportModal();
+    ocrBatchActive = true;
     hideOcrLoading();
 }
 
@@ -1396,7 +1495,7 @@ export function openOcrImportModal() {
                         </button>
                         <div>
                             <h3 class="text-lg font-semibold text-ink">截图识别结果预览</h3>
-                            <p class="text-sm text-muted mt-1">共 <span id="ocrCount">${ocrRows.length}</span> 笔待确认 · 请核对后按序导入</p>
+                            <p class="text-sm text-muted mt-1">共 <span id="ocrCount">${ocrRows.length}</span> 笔待确认 · 可继续添加截图（自动去重）· 请核对后按序导入</p>
                         </div>
                     </div>
 
@@ -1412,6 +1511,7 @@ export function openOcrImportModal() {
                     </div>
 
                     <div class="px-6 py-4 border-t border-hairline flex gap-3">
+                        <button onclick="addOcrScreenshots()" class="px-4 py-3 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors whitespace-nowrap">+ 添加截图</button>
                         <button onclick="closeOcrImportModal()" class="flex-1 px-4 py-3 text-sm font-medium text-body bg-surface-strong hover:bg-hairline rounded-xl transition-colors">取消</button>
                         <button id="ocrImportBtn" onclick="importOcrRows()" class="flex-1 px-4 py-3 text-sm font-semibold text-white bg-primary hover:bg-primary-active rounded-xl transition-colors shadow-sm shadow-primary/25">确认并按序导入</button>
                     </div>
@@ -1435,6 +1535,7 @@ export function closeOcrImportModal() {
     document.body.style.overflow = '';
     ocrRows = [];
     ocrImporting = false;
+    ocrBatchActive = false;
 }
 
 export function ocrDeleteRow(uid) {
@@ -1493,6 +1594,7 @@ function buildPayload(r) {
         price: r.price,
         from_cash: true,
         cost_method: 'average',
+        skip_if_duplicate: true,   // 落库时跳过「同客户+5字段」已存在的重复交易
     };
     if (r.fee != null && !isNaN(r.fee)) { payload.fee_mode = 'fixed'; payload.fee_value = r.fee; }
     if (r.datetime) {
@@ -1511,7 +1613,17 @@ async function runSingleImport(uid, currentClient) {
     if (status) status.textContent = '录入中…';
     if (card) card.classList.remove('animate-shake', 'border-negative');
     const result = await executeAdjustApi(currentClient.id, buildPayload(r));
-    if (card) fadeOutRow(card);
+    if (result && result.duplicate) {
+        // 后端命中「同客户+5字段」已存在交易：标记为已跳过（不淡出，保留供用户核对）
+        if (card) {
+            card.classList.add('border-dashed', 'opacity-70');
+            if (status) status.textContent = '已存在（已跳过重复）';
+            const d = document.getElementById('ocrDot_' + uid);
+            if (d) d.className = 'ocr-dot w-2.5 h-2.5 rounded-full bg-muted';
+        }
+    } else if (card) {
+        fadeOutRow(card);
+    }
     return result;
 }
 
@@ -1598,6 +1710,7 @@ export async function ocrRetryRow(uid) {
 }
 
 function finishImport(done, total, failed) {
+    ocrBatchActive = false;
     const currentClient = getCurrentClient();
     if (currentClient) {
         Promise.all([fetchClientPortfolio(currentClient.id), fetchClientPnlHistory(currentClient.id)])

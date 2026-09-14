@@ -1167,6 +1167,7 @@ def do_adjust(client_id: str, body: AdjustRequest, db: Session = Depends(get_db)
             actor=user,
             from_cash=body.from_cash,
             cost_method=body.cost_method,  # type: ignore[arg-type]
+            skip_if_duplicate=body.skip_if_duplicate,
         )
     except AdjustError as e:
         raise HTTPException(422, detail=str(e)) from e
@@ -1185,6 +1186,7 @@ def do_adjust(client_id: str, body: AdjustRequest, db: Session = Depends(get_db)
         "portfolio": result.get("portfolio"),
         "cost_basis_matches": result.get("cost_basis_matches", []),
         "cost_method": result.get("cost_method", body.cost_method),
+        "duplicate": bool(result.get("duplicate", False)),
     }
 
 

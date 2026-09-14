@@ -49,7 +49,8 @@ def execute_adjust(db: Session, client: Client, *, code: str, action: str,
                    executed_at: Optional[dt.datetime] = None,
                    actor: Optional[User] = None,
                    from_cash: bool = True,
-                   cost_method: CostMethod = "average") -> dict:
+                   cost_method: CostMethod = "average",
+                   skip_if_duplicate: bool = False) -> dict:
     """执行一笔调仓（买入/卖出），单事务原子更新所有相关表。
 
     Args:
@@ -86,6 +87,7 @@ def execute_adjust(db: Session, client: Client, *, code: str, action: str,
             fee_value=fee_value, trade_date=trade_date,
             executed_at=executed_at, actor=actor,
             from_cash=from_cash, cost_method=cost_method,
+            skip_if_duplicate=skip_if_duplicate,
         )
     except Exception:
         db.rollback()
@@ -110,12 +112,44 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
                          executed_at: Optional[dt.datetime],
                          actor: Optional[User],
                          from_cash: bool,
-                         cost_method: CostMethod) -> dict:
+                         cost_method: CostMethod,
+                         skip_if_duplicate: bool = False) -> dict:
     # 交易时间戳：优先使用调用方人为指定值；否则使用服务器当前 UTC 时间
     executed_at = executed_at if executed_at is not None else dt.datetime.utcnow()
     date_str = trade_date or executed_at.date().isoformat()
     amount = quantity * price
     market = infer_market_from_code(code)
+
+    # ------------------------------------------------------------------
+    # 0. 导入去重守卫（仅导入路径开启 skip_if_duplicate）
+    #    判定：同一 client 下，code(无 code 时退化为 name) + action + quantity + price + executed_at
+    #    五个字段完全一致 → 视为同一笔已存在交易，跳过写入（不创建流水/持仓/现金变动）。
+    #    人工调仓不开启此开关，故不影响手工录入语义；未显式指定时间（executed_at 为服务器
+    #    当前时间）时不会命中（每次 now 不同），天然避免误删。
+    # ------------------------------------------------------------------
+    if skip_if_duplicate and (code or name) and executed_at is not None:
+        stock_filter = Transaction.code == code if code else Transaction.name == name
+        existing = db.query(Transaction).filter(
+            Transaction.client_id == client.id,
+            stock_filter,
+            Transaction.action == action,
+            Transaction.quantity == quantity,
+            Transaction.price == price,
+            Transaction.executed_at == executed_at,
+        ).first()
+        if existing is not None:
+            db.refresh(existing)
+            return {
+                "transaction": existing,
+                "position": db.query(Position).filter(
+                    Position.client_id == client.id, Position.code == code,
+                ).first(),
+                "available_cash": client.available_cash,
+                "duplicate": True,
+                "skipped": True,
+                "cost_basis_matches": [],
+                "cost_method": cost_method,
+            }
 
     position = db.query(Position).filter(
         Position.client_id == client.id, Position.code == code,

@@ -133,7 +133,10 @@ _NAME_LIKE_RE = re.compile(r"^[一-鿿]{2,6}$")
 # 后续碎片行：仅含数字。真实 OCR 可能把 6 位代码拆成多行（如 300750 → 30075 / 50 / 0）
 _DIGIT_LINE_RE = re.compile(r"^\d+$")
 _DATE_RE = re.compile(
-    r"(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})[ 日]*[,\s]*(\d{1,2})[:：](\d{2})(?:[:：](\d{2}))?"
+    r"(?:买|卖)?"  # 同花顺历史成交常把方向粘到紧凑日期前：卖2020040114:47:21 / 买2020040213:00:13
+    r"(\d{4})[-/年.]?(\d{1,2})[-/月.]?(\d{1,2})"
+    r"[ 日]*[,\s]*"
+    r"(\d{1,2})[:：](\d{2})(?:[:：](\d{2}))?"
 )
 _QTY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*股")
 _PRICE_RE = re.compile(r"(?:成交价|价格|单价|现价)[：: ]*?(\d+(?:\.\d+)?)")
@@ -164,6 +167,29 @@ def _code_from_following(lines: list[tuple[str, float]], i: int):
     return None, i
 
 
+def _is_compact_trade_anchor(lines: list[tuple[str, float]], i: int) -> bool:
+    """同花顺等 App「历史成交」截图没有 6 位代码，用「名称 + 日期/方向」判断是否为交易锚点。
+
+    在名称行后 3 行内出现以下任一特征即视为锚点：
+      - 含「买入」/「卖出」
+      - 含方向前缀的紧凑日期（卖2020040114:47:21 / 买2020040213:00:13）
+      - 含普通日期（兼容日期在方向前出现的变体）
+    不含真实买卖方向的行（申购配号 / 股息红利税补等）最终会被末态过滤丢弃。
+    """
+    n = len(lines)
+    for j in range(i + 1, min(i + 4, n)):
+        t = (lines[j][0] or "").strip()
+        if not t:
+            continue
+        if "买入" in t or "卖出" in t:
+            return True
+        if re.match(r"^[买卖]\d{8}", t):
+            return True
+        if _DATE_RE.search(t):
+            return True
+    return False
+
+
 def _new_trade() -> dict:
     return {
         "name": None, "code": None, "action": None, "quantity": None,
@@ -183,12 +209,38 @@ def _finalize(cur: dict) -> OcrTrade:
     )
 
 
-def parse_trade_lines(lines: list[tuple[str, float]]) -> list[OcrTrade]:
-    """将 OCR 文本行聚合成交易行。每遇到「名称+代码」即开启新一笔。
+def _assign_compact_number(cur: dict, text: str, score: float) -> bool:
+    """同花顺无代码交易：未命中显式 label 时，按出现顺序把纯数字行赋为 price/qty/amount。
 
-    支持两种锚点形态（真实 RapidOCR 输出常是跨行的）：
+    顺序约定（与 OCR 输出一致）：价格 → 数量（可带负号，取绝对值） → 成交金额。
+    已命中显式 label 的字段不会被覆盖。
+    """
+    m = re.fullmatch(r"\s*([+-]?\d+(?:\.\d+)?)\s*", text)
+    if not m:
+        return False
+    val = float(m.group(1))
+    if cur["price"] is None and cur["quantity"] is None:
+        cur["price"] = val
+        cur["conf"]["price"] = score
+        return True
+    if cur["quantity"] is None:
+        cur["quantity"] = int(round(abs(val)))
+        cur["conf"]["quantity"] = score
+        return True
+    if cur["amount"] is None:
+        cur["amount"] = val
+        cur["conf"]["amount"] = score
+        return True
+    return False
+
+
+def parse_trade_lines(lines: list[tuple[str, float]]) -> list[OcrTrade]:
+    """将 OCR 文本行聚合成交易行。每遇到「名称+代码」或「名称+日期/方向」即开启新一笔。
+
+    支持三种锚点形态（真实 RapidOCR 输出常是跨行的）：
     - 同行：名称与代码在同一行（如「贵州茅台 600519」）。
     - 跨行：名称行紧接 6 位代码（可能被拆成多行碎片，如「宁德时代」/「30075」/「0」）。
+    - 无代码：同花顺等 App 历史成交只有股票名称，用「名称 + 日期/方向」作锚点。
     """
     trades: list[OcrTrade] = []
     cur = _new_trade()
@@ -246,6 +298,13 @@ def parse_trade_lines(lines: list[tuple[str, float]]) -> list[OcrTrade]:
                 start_anchor(text, code, score, code_score)
                 i = j  # 跳过已被拼入代码的碎片行
                 continue
+            # 3) 同花顺等 App「历史成交」只有股票名称、无 6 位代码，
+            #    用「名称 + 日期/方向」作无代码交易锚点。
+            if _is_compact_trade_anchor(lines, i):
+                start_anchor(text, None, score, score)
+                cur["no_code"] = True
+                i += 1
+                continue
 
         if not fired:
             # 时间
@@ -293,11 +352,17 @@ def parse_trade_lines(lines: list[tuple[str, float]]) -> list[OcrTrade]:
                 cur["fee"] = float(fm.group(1))
                 cur["conf"]["fee"] = score
 
+            # 无代码交易（同花顺历史成交）：未命中显式 label 时，按出现顺序把纯数字行
+            # 赋为 price / quantity / amount。
+            if cur.get("no_code"):
+                _assign_compact_number(cur, text, score)
+
         i += 1
 
     if started:
         trades.append(_finalize(cur))
-    return trades
+    # 无代码锚点会误把「申购配号 / 股息红利税补」等非买卖行拉进来，最终只保留真实买卖。
+    return [t for t in trades if t.action in ("buy", "sell")]
 
 
 def _get_engine() -> OcrEngine:
