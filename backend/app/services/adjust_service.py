@@ -50,7 +50,8 @@ def execute_adjust(db: Session, client: Client, *, code: str, action: str,
                    actor: Optional[User] = None,
                    from_cash: bool = True,
                    cost_method: CostMethod = "average",
-                   skip_if_duplicate: bool = False) -> dict:
+                   skip_if_duplicate: bool = False,
+                   source: Optional[str] = None) -> dict:
     """执行一笔调仓（买入/卖出），单事务原子更新所有相关表。
 
     Args:
@@ -88,6 +89,7 @@ def execute_adjust(db: Session, client: Client, *, code: str, action: str,
             executed_at=executed_at, actor=actor,
             from_cash=from_cash, cost_method=cost_method,
             skip_if_duplicate=skip_if_duplicate,
+            source=source,
         )
     except Exception:
         db.rollback()
@@ -113,7 +115,8 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
                          actor: Optional[User],
                          from_cash: bool,
                          cost_method: CostMethod,
-                         skip_if_duplicate: bool = False) -> dict:
+                         skip_if_duplicate: bool = False,
+                         source: Optional[str] = None) -> dict:
     # 交易时间戳：优先使用调用方人为指定值；否则使用服务器当前 UTC 时间
     executed_at = executed_at if executed_at is not None else dt.datetime.utcnow()
     date_str = trade_date or executed_at.date().isoformat()
@@ -266,6 +269,7 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
         realized_pnl=realized_pnl,
         trade_date=date_str,
         executed_at=executed_at,
+        source=source or "manual",
     )
     db.add(transaction)
     db.flush()  # 取 id

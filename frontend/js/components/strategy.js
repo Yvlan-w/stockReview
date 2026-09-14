@@ -14,6 +14,14 @@ const MARKET_LABEL = {
     SH: '沪', SZ: '深', BJ: '北', HK: '港', US: '美',
 };
 
+// 交易来源 → 中文标签（溯源：区分手工 / 交易截图导入 / 持仓截图导入）
+const SOURCE_LABEL = {
+    ocr_import: '截图导入',
+    holding_import: '持仓截图',
+    manual: '手工',
+    adjust: '调仓执行',
+};
+
 // 格式化数据库时间戳 executed_at → YYYY-MM-DD HH:mm:ss（统一东八区 UTC+8）
 // 后端以零时区（UTC，无时区标记的 naive 字符串，如 2026-09-04T06:23:08）存储并返回；
 // 必须先将其显式按 UTC 解释（补 Z），否则 new Date() 会把无时区字符串当作「本地时间」解析，
@@ -171,7 +179,7 @@ function renderTradeRow(tx) {
                 <div class="lg:w-64 flex-shrink-0">
                     <div class="text-xs text-muted font-mono">${datePart || '—'}</div>
                     <div class="text-xs text-muted/70 font-mono">${timePart || ''}</div>
-                    ${tx.source ? `<div class="mt-1 inline-block px-2 py-0.5 text-[10px] font-medium rounded-md bg-surface-strong text-muted/80">${tx.source === 'adjust' ? '调仓执行' : tx.source}</div>` : ''}
+                    ${tx.source ? `<div class="mt-1 inline-block px-2 py-0.5 text-[10px] font-medium rounded-md bg-surface-strong text-muted/80" title="操作链路审计ID: ${tx.audit_log_id ?? '-'}">${SOURCE_LABEL[tx.source] || tx.source}</div>` : ''}
                 </div>
 
                 <div class="flex-1 min-w-0">
@@ -289,6 +297,22 @@ export function toggleStrategyTimeline(btnEl) {
             // 平滑滚动到底部，让用户第一时间看到展开后的新记录
             container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
         }
+    }
+}
+
+// 展开策略复盘时间线（导入交易后调用，确保新记录即使超过初始阈值也立即可见）
+export function expandStrategyTimeline() {
+    const rest = document.getElementById('strategyTimelineRest');
+    if (!rest) return;               // 记录数 ≤ 初始阈值，无需展开
+    rest.classList.remove('hidden');
+    const btn = document.getElementById('strategyExpandBtn');
+    const txt = document.getElementById('strategyExpandText');
+    const svg = btn?.querySelector('svg');
+    if (svg) svg.style.transform = 'rotate(180deg)';
+    if (txt) txt.textContent = '收起';
+    const container = document.getElementById('strategyTimeline');
+    if (container) {
+        container.classList.add('max-h-[65vh]', 'lg:max-h-[75vh]', 'overflow-y-auto', 'scroll-smooth', 'scrollbar-thin', 'scrollbar-track-transparent');
     }
 }
 

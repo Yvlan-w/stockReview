@@ -8,6 +8,7 @@ import { formatCurrency, formatNumber, getPnLColor } from '../core/formatters.js
 import { SECTORS } from '../core/config.js';
 import { showToast, hideToast } from '../core/ui.js';
 import { refreshAll, refreshRealtime } from './overview.js';
+import { renderStrategySection, expandStrategyTimeline } from './strategy.js';
 import { renderClientProfile } from './workbench.js';
 import { refreshClientSummaries } from './workbench.js';
 import { canEditClient } from '../permissions/access.js';
@@ -1358,18 +1359,23 @@ async function handleOcrFile(file) {
         showToast('未识别到交易记录，请检查截图清晰度', 'warn', 4000);
         return;
     }
-    // 名称→代码/板块 最佳努力解析（不覆盖用户最终可编辑值）
+    // 板块兜底：复用「添加持仓」时通过股票名称/代码反查得到的板块信息（同源 searchStocksApi，
+    // 与持仓截图导入的 _applyHoldingLookup 一致），仅补全缺失项、不覆盖用户已填值；
+    // 反查得到的板块作为兜底，从而保持后端原有「新建持仓必须提供板块」校验完整有效。
     for (const row of rows) {
-        if (row.name && !row.code) {
-            try {
-                const { results } = await searchStocksApi(row.name, 5);
-                const exact = (results || []).find(s => s.name === row.name) || (results || [])[0];
-                if (exact) {
-                    row.code = exact.code || row.code;
-                    if (!row.sector && exact.sector) row.sector = exact.sector;
-                }
-            } catch { /* 静默失败，用户手动填 */ }
-        }
+        if (row.code && row.name && row.sector) continue;   // 三项齐全，无需反查
+        const kw = row.code || row.name;
+        if (!kw) continue;
+        try {
+            const { results } = await searchStocksApi(kw, 5);
+            const exact = (results || []).find(s => s.code === row.code || s.name === row.name)
+                       || (results || [])[0];
+            if (exact) {
+                if (!row.code && exact.code) row.code = exact.code;
+                if (!row.name && exact.name) row.name = exact.name;
+                if (!row.sector && exact.sector) row.sector = exact.sector;
+            }
+        } catch { /* 静默失败，交回用户手动补全（保持校验生效） */ }
     }
     // 批次已开启：将新截图识别出的交易追加进当前批次，并执行跨截图去重。
     if (ocrBatchActive) {
@@ -1595,6 +1601,7 @@ function buildPayload(r) {
         from_cash: true,
         cost_method: 'average',
         skip_if_duplicate: true,   // 落库时跳过「同客户+5字段」已存在的重复交易
+        source: 'ocr_import',      // 溯源：本笔来自交易截图 OCR 导入
     };
     if (r.fee != null && !isNaN(r.fee)) { payload.fee_mode = 'fixed'; payload.fee_value = r.fee; }
     if (r.datetime) {
@@ -1627,6 +1634,43 @@ async function runSingleImport(uid, currentClient) {
     return result;
 }
 
+/** 录入前校验：卖出记录必须落在当前实际持仓内（标的存在且数量不超持仓）。
+ * 采用与正式导入一致的「按时间升序」模拟：先以当前持仓为基准，逐笔回放批次内交易，
+ * 买入累加、卖出扣减；若某笔卖出标的在可用持仓中不存在，或数量大于可用持仓，则记为违规。
+ * 返回违规项数组 [{uid, reason}]；空数组表示全部通过。
+ */
+function validateOcrSellHoldings(toImport) {
+    const held = new Map();  // code -> 可用数量
+    for (const p of (getUserPositions() || [])) {
+        if (!p.code) continue;
+        held.set(p.code, (held.get(p.code) || 0) + (Number(p.quantity) || 0));
+    }
+    // 与正式导入一致的排序：按时间升序（无时间保持原序）
+    const ordered = [...toImport].sort(
+        (a, b) => (a.datetime || '~').localeCompare(b.datetime || '~'));
+    const violations = [];
+    for (const r of ordered) {
+        const code = r.code;
+        if (r.action === 'buy') {
+            held.set(code, (held.get(code) || 0) + (Number(r.quantity) || 0));
+        } else if (r.action === 'sell') {
+            const have = held.get(code) || 0;
+            const label = `${r.name || ''}(${code})`;
+            if (have <= 0) {
+                violations.push({ uid: r.uid, reason: `卖出 ${label} ${r.quantity} 股：当前持仓中不存在该标的` });
+            } else if (Number(r.quantity) > have) {
+                violations.push({
+                    uid: r.uid,
+                    reason: `卖出 ${label} ${r.quantity} 股：实际持仓仅 ${have} 股，超出 ${Number(r.quantity) - have} 股`,
+                });
+            } else {
+                held.set(code, have - Number(r.quantity));
+            }
+        }
+    }
+    return violations;
+}
+
 export async function importOcrRows() {
     if (!guardEdit()) return;
     if (ocrImporting) return;
@@ -1644,6 +1688,16 @@ export async function importOcrRows() {
         if (r.action === 'buy' && (!r.name || !r.sector)) { markRowError(r.uid, '买入需名称+板块'); showToast(`❌ 第 ${labelOf(r.uid)} 行买入需补全名称与板块`, 'error'); return; }
     }
     if (!toImport.length) { showToast('没有需要导入的记录', 'warn'); return; }
+
+    // 录入前校验：卖出记录须落在当前实际持仓内；否则整批拒绝并明确提示。
+    const violations = validateOcrSellHoldings(toImport);
+    if (violations.length) {
+        for (const v of violations) markRowError(v.uid, v.reason);
+        showToast(
+            `❌ 交易截图无法录入：有 ${violations.length} 笔卖出记录与当前持仓不符（已标红），请核对后提供正确的交易截图`,
+            'error', 9000);
+        return;
+    }
 
     // 按时间升序（无时间保持原序），逐条录入
     toImport.sort((a, b) => (a.datetime || '~').localeCompare(b.datetime || '~'));
@@ -1691,6 +1745,9 @@ export async function ocrRetryRow(uid) {
     try {
         await runSingleImport(uid, currentClient);
         showToast('✅ 该笔已导入', 'success');
+        // 单笔重试成功后即时刷新交易流水并展开，确保可见
+        await renderStrategySection().catch(() => {});
+        expandStrategyTimeline();
         // 若已无失败项，整体收尾
         setTimeout(() => {
             if (document.querySelectorAll('.ocr-card.animate-shake').length === 0) {
@@ -1714,17 +1771,22 @@ function finishImport(done, total, failed) {
     const currentClient = getCurrentClient();
     if (currentClient) {
         Promise.all([fetchClientPortfolio(currentClient.id), fetchClientPnlHistory(currentClient.id)])
-            .then(([portfolio, pnlHistory]) => {
+            .then(async ([portfolio, pnlHistory]) => {
                 if (portfolio) {
                     syncClientState(portfolio);
-                    refreshAll(portfolio, pnlHistory);
+                    await refreshAll(portfolio, pnlHistory);
                     renderClientProfile(portfolio);
-                    refreshClientSummaries().catch(() => {});
+                    await refreshClientSummaries().catch(() => {});
                 } else {
-                    refreshAll();
+                    await refreshAll();
                 }
+                // 实时刷新交易流水（策略复盘），并确保刚导入的记录立即可见（超过初始阈值也展开）
+                expandStrategyTimeline();
             })
-            .catch(() => refreshAll());
+            .catch(async () => {
+                await refreshAll().catch(() => {});
+                expandStrategyTimeline();
+            });
     }
     const bar = document.getElementById('ocrProgressWrap');
     if (bar) bar.classList.add('hidden');
@@ -2235,6 +2297,7 @@ export async function importOcrHoldings() {
                 price: rec.price,
                 cost_price: rec.cost_price,
                 trade_date: rec.trade_date,
+                source: 'holding_import',   // 溯源：本笔来自持仓截图导入
             }, rec.action);
         }
 
@@ -2256,17 +2319,22 @@ function finishHoldingImport(done) {
     const currentClient = getCurrentClient();
     if (currentClient) {
         Promise.all([fetchClientPortfolio(currentClient.id), fetchClientPnlHistory(currentClient.id)])
-            .then(([portfolio, pnlHistory]) => {
+            .then(async ([portfolio, pnlHistory]) => {
                 if (portfolio) {
                     syncClientState(portfolio);
-                    refreshAll(portfolio, pnlHistory);
+                    await refreshAll(portfolio, pnlHistory);
                     renderClientProfile(portfolio);
-                    refreshClientSummaries().catch(() => {});
+                    await refreshClientSummaries().catch(() => {});
                 } else {
-                    refreshAll();
+                    await refreshAll();
                 }
+                // 实时刷新交易流水（策略复盘），并确保刚导入的记录立即可见（超过初始阈值也展开）
+                expandStrategyTimeline();
             })
-            .catch(() => refreshAll());
+            .catch(async () => {
+                await refreshAll().catch(() => {});
+                expandStrategyTimeline();
+            });
     }
     const bar = document.getElementById('ocrHoldingProgressWrap');
     if (bar) bar.classList.add('hidden');

@@ -347,6 +347,10 @@ class Transaction(Base):
     # 卖出批次匹配记账（FIFO 物理批次口径）：[{lot_id, buy_transaction_id, matched_quantity}]
     # 用于「撤销」时精确识别该卖出跨越的批次；买入/调整为空
     matched_lots = Column(JSON, nullable=True, comment="卖出批次匹配明细（FIFO 记账用），买入/调整为空")
+    # 交易来源与操作链路溯源（v0.1.6）：区分手工调仓 / 交易截图导入 / 持仓截图导入，
+    # 配合 audit_log_id（操作人/时间/动作）构成可审计的操作链路。
+    source = Column(String(16), nullable=True, default="manual",
+                   comment="交易来源：manual=手工调仓/调整；ocr_import=交易截图导入；holding_import=持仓截图导入")
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
 

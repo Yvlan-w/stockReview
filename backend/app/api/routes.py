@@ -1124,6 +1124,7 @@ def _create_transaction_impl(db: Session, client_id: str, body, trade_date: str)
         realized_pnl=realized_pnl,
         trade_date=trade_date,
         executed_at=dt.datetime.utcnow(),
+        source=body.source or "manual",
     )
     db.add(tx)
     db.commit()
@@ -1168,6 +1169,7 @@ def do_adjust(client_id: str, body: AdjustRequest, db: Session = Depends(get_db)
             from_cash=body.from_cash,
             cost_method=body.cost_method,  # type: ignore[arg-type]
             skip_if_duplicate=body.skip_if_duplicate,
+            source=body.source,
         )
     except AdjustError as e:
         raise HTTPException(422, detail=str(e)) from e

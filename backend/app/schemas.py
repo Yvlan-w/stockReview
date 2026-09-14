@@ -310,6 +310,7 @@ class TransactionCreate(BaseModel):
     fee_mode: Optional[str] = Field(None, pattern="^(rate|fixed)$")  # 手续费模式
     fee_value: Optional[float] = None  # 费率值（rate）或固定金额（fixed）
     trade_date: Optional[str] = None  # 交易日期，默认今天
+    source: Optional[str] = None  # 交易来源（manual/ocr_import/holding_import），用于可溯源
 
     @model_validator(mode="after")
     def _validate_fee(self):
@@ -349,6 +350,7 @@ class TransactionOut(BaseModel):
     executed_at: Optional[datetime] = None
     audit_log_id: Optional[int] = None  # 关联的审计日志（人工调仓会有，种子/系统操作可能为空）
     matched_lots: Optional[list] = None  # 卖出批次匹配明细（FIFO 记账用），买入/调整为空
+    source: Optional[str] = None  # 交易来源（manual/ocr_import/holding_import）
     created_at: datetime
 
 
@@ -367,6 +369,7 @@ class AdjustRequest(BaseModel):
     from_cash: bool = True
     cost_method: str = Field("average", pattern="^(average|fifo|lifo)$")
     skip_if_duplicate: bool = False  # 导入场景：若同客户已存在「代码/名称+方向+数量+价格+时间」完全一致的交易则跳过写入
+    source: Optional[str] = None  # 交易来源（manual/ocr_import/holding_import），用于可溯源
 
     @model_validator(mode="after")
     def _validate_fee(self):
