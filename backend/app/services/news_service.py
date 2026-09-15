@@ -692,8 +692,9 @@ def refresh_stock_boards(db: Session, force: bool = False, throttle_hours: int =
     if not force:
         newest = db.query(func.max(StockBoards.updated_at)).scalar()
         if newest is not None:
-            if newest.tzinfo is not None:
-                newest = newest.replace(tzinfo=None)
+            # utcnow() 返回 offset-aware UTC，需统一两者时区再相减
+            if newest.tzinfo is None:
+                newest = newest.replace(tzinfo=timezone.utc)
             if (utcnow() - newest).total_seconds() < throttle_hours * 3600:
                 return 0
     codes = all_held_codes(db)

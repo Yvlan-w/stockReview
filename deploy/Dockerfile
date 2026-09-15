@@ -16,10 +16,13 @@ ENV TZ=Asia/Shanghai \
     PYTHONDONTWRITEBYTECODE=1
 
 # ---- Minimal runtime apt packages (tzdata + curl for healthcheck) ----
+# Plus OpenCV system libs required by rapidocr-onnxruntime (cv2 import):
+#   libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libx11-6 libxcb1 libgthread-2.0-0
 # Immediately clean apt caches (saves ~20MB vs leaving lists)
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends tzdata curl \
+        libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libx11-6 libxcb1 libgthread-2.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/* \
     && rm -rf /var/log/apt/*

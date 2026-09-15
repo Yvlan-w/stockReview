@@ -104,7 +104,7 @@ function renderStats(stats) {
 //   加仓（buy + prev_cost_price 存在）→ "成本价 ¥new(+¥Δ)" 或 "成本价 ¥new(-¥Δ)"，Δ 字红绿
 //   新买入（buy + prev_cost_price 为空）→ 只显示 "成本价 ¥new"，无括号
 //   卖出（sell）→ 仅显示 "成本价 ¥curr"，无括号（用户明确：卖出成本价不变，不显示括号）
-//   清仓（sell 且 cost_price 空）→ "成本价 —"
+//   清仓（sell 且 cost_price 空）→ 回退展示 prev_cost_price（清仓前持仓成本价），而非 "—"
 function renderCostPriceCell(tx) {
     const isBuy = tx.action === 'buy';
     const curr = tx.cost_price;
@@ -113,7 +113,14 @@ function renderCostPriceCell(tx) {
     // 基础文案：成本价 + 交易后最新成本价
     let base = '成本价 ';
     if (curr == null || isNaN(curr)) {
-        base += '<span class="font-mono text-ink">—</span>';
+        // 清仓（sell 且持仓已删）：交易后成本价为空，但 prev_cost_price 仍记录「清仓前持仓成本价」，
+        // 即本次清仓的真实成本基准，应展示而非显示「—」，确保清仓后仍能看到对应持仓的成本价。
+        const ref = (prev != null && !isNaN(prev)) ? prev : null;
+        if (ref != null) {
+            base += `<span class="font-mono text-ink">¥${formatNumber(ref)}</span>`;
+        } else {
+            base += '<span class="font-mono text-ink">—</span>';
+        }
         return base;
     }
     base += `<span class="font-mono text-ink">¥${formatNumber(curr)}</span>`;
