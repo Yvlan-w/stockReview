@@ -109,3 +109,5 @@ desktop.ini
 # ============================================================
 *.tar
 Dockerfile.dev
+# 部署冒烟测试（smoke-upgrade）生成的通过凭证，本地重建、不入库
+deploy/.smoke-upgrade.stamp
