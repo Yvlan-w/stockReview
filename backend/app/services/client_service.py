@@ -1,4 +1,5 @@
 """客户管理服务：CRUD、关系映射校验、角色数据范围。"""
+import datetime as dt
 import logging
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -111,6 +112,7 @@ def create_client(db: Session, data: ClientCreate, creator: User | None = None, 
         db.add(Position(
             client_id=client.id, name=p.name, code=p.code, sector=p.sector,
             quantity=p.quantity, cost_price=p.cost_price,
+            opened_date=dt.date.today().isoformat(),
         ))
     db.commit()
     db.refresh(client)
@@ -270,11 +272,16 @@ def update_client_positions(db: Session, client: Client, positions) -> Client:
     持仓变更后回扫 TTL 内存量新闻，补齐 client_news 关联——确保已入库新闻也能即时联动到
     该客户资讯栏（而非只能等下一条新闻入库）。匹配失败不影响持仓写入结果。
     """
+    # 整体替换持仓：先快照旧 code→opened_date，重建时沿用（避免把老持仓误标为今日新建），
+    # 新出现的 code 视为今日新建。
+    existing_opened = {p.code: p.opened_date for p in client.positions}
+    today_str = dt.date.today().isoformat()
     client.positions.clear()
     for p in positions:
         client.positions.append(Position(
             name=p.name, code=p.code, sector=p.sector,
             quantity=p.quantity, cost_price=p.cost_price,
+            opened_date=existing_opened.get(p.code) or today_str,
         ))
     db.commit()
     db.refresh(client)

@@ -2,7 +2,7 @@
 
 核心计算公式：
 - 浮动盈亏 = Σ (current_price - cost_price) × quantity（当前持仓的浮盈浮亏）
-- 今日浮动盈亏 = Σ (current_price - prev_day_close) × quantity（持仓的日内波动）
+- 今日浮动盈亏 = Σ [(现价-昨收)×昨日持有量 + (现价-成本价)×今日新增量]（持仓日内波动；当日新建持仓用成本价基准）
 - 累计盈亏 = 浮动盈亏 + 所有历史已实现盈亏（含手续费调整）
 - 今日总盈亏 = 今日浮动盈亏 + 今日已实现盈亏
 - 总资产 = 持仓市值 + 可用资金
@@ -31,7 +31,7 @@ import datetime as dt
 import logging
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from .. import config
@@ -213,7 +213,7 @@ def compute_portfolio(db: Session, client: Client) -> dict:
 
     核心计算公式：
     - 浮动盈亏 = Σ (current_price - cost_price) × quantity
-    - 今日浮动盈亏 = Σ (current_price - prev_close) × quantity
+    - 今日浮动盈亏 = Σ [(现价-昨收)×昨日持有量 + (现价-成本价)×今日新增量]（按今日交易净变动拆分）
     - 累计盈亏 = 浮动盈亏 + 所有历史已实现盈亏
     - 今日总盈亏 = 今日浮动盈亏 + 今日已实现盈亏
     - 累计收益率 = 累计盈亏 / 持仓成本 × 100%
@@ -265,6 +265,34 @@ def compute_portfolio(db: Session, client: Client) -> dict:
             "availableCash": cash,
             "positions": [],
         }
+
+    # 今日交易净变动（按标的）：净买入(含 adjust) − 净卖出。
+    # 用于「今日盈亏」口径拆分：
+    #   net_today[code] > 0 → 今日新增持仓份额（用成本价口径）
+    #   net_today[code] < 0 → 今日减仓份额（仍属昨日持有，用昨收口径）
+    #   net_today[code] == 0 → 昨日即持有、今日无交易（退化为统一昨收口径，零回归）
+    today_str = dt.date.today().isoformat()
+    net_today = {}
+    if positions:
+        tx_rows = db.execute(
+            select(Transaction.code, Transaction.action, func.sum(Transaction.quantity))
+            .where(
+                Transaction.client_id == client.id,
+                Transaction.trade_date == today_str,
+                Transaction.action.in_(["buy", "sell", "adjust"]),
+            )
+            .group_by(Transaction.code, Transaction.action)
+        ).all()
+        buy_adj: dict = {}
+        sell: dict = {}
+        for code, action, qty in tx_rows:
+            q = float(qty or 0.0)
+            if action == "sell":
+                sell[code] = sell.get(code, 0.0) + q
+            else:
+                buy_adj[code] = buy_adj.get(code, 0.0) + q
+        for code in set(buy_adj) | set(sell):
+            net_today[code] = buy_adj.get(code, 0.0) - sell.get(code, 0.0)
 
     # 1. 查询所有历史卖出交易的已实现盈亏（累计）
     all_sell_realized = db.execute(
@@ -328,11 +356,17 @@ def compute_portfolio(db: Session, client: Client) -> dict:
         floating_pnl = market_value - cost_value  # 浮动盈亏
         pnl_pct = (floating_pnl / cost_value * 100) if cost_value > 0 else 0.0
 
-        # 今日浮动盈亏（持仓日内波动）
-        if prev_close and prev_close > 0:
-            today_floating = (current_price - prev_close) * pos.quantity
-        else:
-            today_floating = 0.0
+        # 今日浮动盈亏（持仓日内波动）——通用拆分口径：
+        #   昨日已持有的份额 → (现价 − 昨收) × 量
+        #   今日新增的份额   → (现价 − 成本价) × 量
+        # 当 net_today==0（昨日即持有、今日无交易）时两式退化为统一的 (现价−昨收)×量，
+        # 与历史行为完全一致，零回归；对当日新建/加仓持仓则正确改用成本价基准。
+        nt = net_today.get(pos.code, 0.0)
+        qty_held_yesterday = max(pos.quantity - nt, 0.0)
+        qty_new_today = max(nt, 0.0)
+        old_part = (current_price - prev_close) * qty_held_yesterday if (prev_close and prev_close > 0) else 0.0
+        new_part = (current_price - pos.cost_price) * qty_new_today
+        today_floating = old_part + new_part
 
         total_market_value += market_value
         total_cost += cost_value

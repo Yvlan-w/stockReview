@@ -236,6 +236,8 @@ def _migrate_sqlite_columns():
         # 账户生命周期（v0.1.5）：非 admin 默认 DEFAULT_LICENSE_DAYS，到期自动变 expired 禁止登录
         ("users", "status", "VARCHAR(16) NOT NULL DEFAULT 'active'"),
         ("users", "expires_at", "DATETIME"),
+        # 持仓建仓日期（v0.1.7）：区分当日新建/历史持仓，「今日盈亏」口径修正所需
+        ("positions", "opened_date", "VARCHAR(10)"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:

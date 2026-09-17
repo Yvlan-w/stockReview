@@ -143,6 +143,9 @@ class Position(Base):
     sector = Column(String(16), nullable=False)
     quantity = Column(Integer, nullable=False, default=0)
     cost_price = Column(Float, nullable=False, default=0.0)
+    # 建仓日期 YYYY-MM-DD：用于「今日盈亏」口径区分——当日新建持仓用成本价而非昨收计算，
+    # 避免把"昨收→建仓价"的差额误算为今日收益。整体替换持仓时沿用旧 code 的 opened_date。
+    opened_date = Column(String(10), nullable=True)
 
     client = relationship("Client", back_populates="positions")
 

@@ -319,6 +319,7 @@ def _execute_adjust_impl(db: Session, client: Client, *, code: str, action: str,
             position = Position(
                 client_id=client.id, code=code, name=name, sector=sector,
                 quantity=quantity, cost_price=round(tx_cost_price, 4),
+                opened_date=dt.date.today().isoformat(),
             )
             db.add(position)
         else:
@@ -489,6 +490,7 @@ def reverse_last_transaction(db: Session, client: Client, code: str) -> dict:
                 name=tx.name, sector=None,
                 quantity=tx.quantity,
                 cost_price=tx.cost_price if tx.cost_price is not None else (tx.price or 0.0),
+                opened_date=dt.date.today().isoformat(),
             )
             db.add(position)
         else:
